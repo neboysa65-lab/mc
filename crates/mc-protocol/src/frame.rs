@@ -16,28 +16,31 @@ pub const MAX_FRAME_LEN: u32 = 2_097_151;
 pub const MAX_UNCOMPRESSED: usize = 2 * 1024 * 1024;
 
 pub fn encode_frame(body: &[u8], threshold: Option<u32>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len() + 8);
+    encode_frame_into(body, threshold, &mut out);
+    out
+}
+
+/// Append the framed packet to `out` (callers coalesce several frames into
+/// one write; the byte stream is identical to separate writes).
+pub fn encode_frame_into(body: &[u8], threshold: Option<u32>, out: &mut Vec<u8>) {
     let Some(th) = threshold else {
-        let mut out = Vec::with_capacity(body.len() + 3);
-        write_varint(&mut out, body.len() as u32);
+        write_varint(out, body.len() as u32);
         out.extend_from_slice(body);
-        return out;
+        return;
     };
     if (body.len() as u32) < th {
         // Not compressed: len covers the 0 marker byte + body.
-        let mut out = Vec::with_capacity(body.len() + 5);
-        write_varint(&mut out, body.len() as u32 + 1);
+        write_varint(out, body.len() as u32 + 1);
         out.push(0);
         out.extend_from_slice(body);
-        out
     } else {
         let comp = compress::deflate(body);
         let dl = varint_size(body.len() as u32);
         let frame_len = (comp.len() + dl) as u32;
-        let mut out = Vec::with_capacity(comp.len() + dl + 3);
-        write_varint(&mut out, frame_len);
-        write_varint(&mut out, body.len() as u32);
+        write_varint(out, frame_len);
+        write_varint(out, body.len() as u32);
         out.extend_from_slice(&comp);
-        out
     }
 }
 

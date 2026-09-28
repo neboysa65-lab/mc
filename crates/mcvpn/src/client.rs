@@ -1,0 +1,375 @@
+//! Client session: connect, Minecraft login, tunnel auth, then the pump
+//! loop that moves IP packets between the device and the MW|Tunnel channel.
+
+use crate::config::ClientConfig;
+use crate::conn::Conn;
+use crate::device::DeviceHandle;
+use crate::error::{VpnError, VpnResult};
+use crate::stats::{SharedStats, Stats};
+use crate::tunnel::{self, Role, TunnelCrypto, TunnelInfo};
+use mc_protocol::packets::{self, play_id, CustomPayload, Handshake};
+use mc_protocol::{login_crypto, PROTOCOL_VERSION};
+use rand::RngCore;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::watch;
+
+pub struct Connected {
+    conn: Conn,
+    crypto: TunnelCrypto,
+    pub info: TunnelInfo,
+    pub stats: SharedStats,
+    cfg: ClientConfig,
+}
+
+async fn recv_timeout(conn: &mut Conn, d: Duration) -> VpnResult<Vec<u8>> {
+    tokio::time::timeout(d, conn.recv()).await.map_err(|_| VpnError::Timeout)?
+}
+
+/// Flatten a JSON chat component reason for display.
+pub fn plain_reason(json: &str) -> String {
+    let mut s = json.to_string();
+    for key in ["text", "translate"] {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
+            if let Some(t) = v.get(key).and_then(|t| t.as_str()) {
+                s = t.to_string();
+                break;
+            }
+        }
+    }
+    s
+}
+
+/// Perform the full Minecraft login + tunnel auth. On success the caller
+/// creates the local device using `info` and calls `attach_device`.
+pub async fn connect(cfg: &ClientConfig) -> VpnResult<Connected> {
+    let addr: SocketAddr = format!("{}:{}", cfg.server, cfg.port).parse().map_err(|_| {
+        VpnError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid server address {}:{}", cfg.server, cfg.port),
+        ))
+    })?;
+    let mut conn = Conn::connect(addr, Duration::from_secs(10)).await?;
+
+    // Handshake (host = the hostname we're connecting to, like a real client).
+    let hs = Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        host: cfg.server.clone(),
+        port: cfg.port,
+        next_state: 2,
+    };
+    conn.send(&hs.encode()).await?;
+    conn.send(&packets::LoginStart { name: crate::derive_username(&cfg.token) }.encode())
+        .await?;
+
+    // Encryption request (like a vanilla client talking to an online-mode server).
+    let body = recv_timeout(&mut conn, Duration::from_secs(10)).await?;
+    if body[0] == mc_protocol::packets::login_id::CB_DISCONNECT {
+        let dc = packets::LoginDisconnect::decode(&body)?;
+        return Err(VpnError::Kick(plain_reason(&dc.reason)));
+    }
+    let enc_req = packets::EncryptionRequest::decode(&body)
+        .map_err(|_| VpnError::Mc(mc_protocol::McError::new("expected encryption request")))?;
+
+    let mut secret = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut secret);
+    let (enc_s, enc_t) = login_crypto::client_encrypt_response(
+        &enc_req.public_key,
+        &secret,
+        &enc_req.verify_token,
+        &mut rand::rngs::OsRng,
+    )?;
+    conn.send(&packets::EncryptionResponse { shared_secret: enc_s, verify_token: enc_t }.encode())
+        .await?;
+    conn.enable_encryption(&secret);
+
+    // From here everything is encrypted: Set Compression, Login Success.
+    let mut got_compression = false;
+    let mut got_success = false;
+    while !(got_compression && got_success) {
+        let body = recv_timeout(&mut conn, Duration::from_secs(10)).await?;
+        match body[0] {
+            mc_protocol::packets::login_id::CB_SET_COMPRESSION => {
+                let sc = packets::SetCompression::decode(&body)?;
+                conn.set_compression(sc.threshold);
+                got_compression = true;
+            }
+            mc_protocol::packets::login_id::CB_LOGIN_SUCCESS => {
+                let _ = packets::LoginSuccess::decode(&body)?;
+                got_success = true;
+            }
+            mc_protocol::packets::login_id::CB_DISCONNECT => {
+                let dc = packets::LoginDisconnect::decode(&body)?;
+                return Err(VpnError::Kick(plain_reason(&dc.reason)));
+            }
+            _ => return Err(VpnError::Mc(mc_protocol::McError::new("unexpected login packet"))),
+        }
+    }
+
+    // Play-state hello, exactly the burst a vanilla client sends.
+    conn.send(&packets::ClientSettings::default().encode()).await?;
+    let brand = CustomPayload { channel: packets::CHANNEL_BRAND.into(), data: b"vanilla".to_vec() };
+    conn.send(&brand.encode_sb()).await?;
+    let register = CustomPayload {
+        channel: packets::CHANNEL_REGISTER.into(),
+        data: packets::CHANNEL_TUNNEL.as_bytes().to_vec(),
+    };
+    conn.send(&register.encode_sb()).await?;
+
+    // Tunnel auth inside the encrypted channel.
+    let mut nonce = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let auth = CustomPayload {
+        channel: packets::CHANNEL_TUNNEL.into(),
+        data: tunnel::encode_auth(&nonce, cfg.token.as_bytes()),
+    };
+    conn.send(&auth.encode_sb()).await?;
+
+    let stats: SharedStats = Arc::new(Stats::default());
+    let deadline = Duration::from_secs(10);
+    let start = Instant::now();
+    let (crypto, info) = loop {
+        if start.elapsed() > deadline {
+            return Err(VpnError::Timeout);
+        }
+        let body = recv_timeout(&mut conn, deadline).await?;
+        match body[0] {
+            play_id::CB_JOIN_GAME => {
+                let _ = packets::JoinGame::decode(&body)?;
+            }
+            play_id::CB_CUSTOM_PAYLOAD => {
+                let cp = CustomPayload::decode_cb(&body)?;
+                if cp.channel == packets::CHANNEL_TUNNEL {
+                    match tunnel::decode(&cp.data)? {
+                        tunnel::TunnelMsg::AuthOk(info) => {
+                            break (TunnelCrypto::derive(&secret, &nonce, Role::Client)?, info);
+                        }
+                        _ => return Err(VpnError::Auth),
+                    }
+                }
+            }
+            play_id::CB_DISCONNECT => {
+                let dc = packets::PlayDisconnect::decode(&body)?;
+                return Err(VpnError::Kick(plain_reason(&dc.reason)));
+            }
+            _ if play_id::cb_known_1_8(body[0]) => {}
+            _ => {}
+        }
+    };
+
+    Ok(Connected { conn, crypto, info, stats, cfg: cfg.clone() })
+}
+
+impl Connected {
+    pub fn info(&self) -> &TunnelInfo {
+        &self.info
+    }
+
+    pub fn stats(&self) -> SharedStats {
+        Arc::clone(&self.stats)
+    }
+
+    /// Run the session: device <-> tunnel packet pumps until error/shutdown.
+    pub async fn attach_device(
+        mut self,
+        mut device: DeviceHandle,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> VpnResult<()> {
+        let tick_period = Duration::from_millis(50);
+        let mut tick = tokio::time::interval(tick_period);
+        let ping_period = Duration::from_secs(self.cfg.ping_interval_secs.max(1));
+        let mut ping = tokio::time::interval(ping_period);
+        ping.reset();
+        let mut pending_ping: Option<Instant> = None;
+        let mut crypto = self.crypto;
+        let stats = Arc::clone(&self.stats);
+
+        loop {
+            tokio::select! {
+                res = shutdown.changed() => {
+                    if res.is_err() || *shutdown.borrow() {
+                        let close = CustomPayload {
+                            channel: packets::CHANNEL_TUNNEL.into(),
+                            data: tunnel::encode_close(0),
+                        };
+                        let _ = self.conn.send(&close.encode_sb()).await;
+                        device.stop_device();
+                        return Ok(());
+                    }
+                }
+                pkt = device.inbox.recv() => {
+                    let Some(ip_packet) = pkt else {
+                        device.stop_device();
+                        return Err(VpnError::Device("device closed".into()));
+                    };
+                    // Drain up to 64 queued packets and coalesce into one write.
+                    let mut batch = vec![ip_packet];
+                    while batch.len() < 128 {
+                        match device.inbox.try_recv() {
+                            Ok(p) => batch.push(p),
+                            Err(_) => break,
+                        }
+                    }
+                    let mut frames = Vec::with_capacity(batch.len());
+                    for ip_packet in batch {
+                        stats.add_up(ip_packet.len() as u64);
+                        let sealed = crypto.seal(&ip_packet)?;
+                        frames.push(
+                            CustomPayload {
+                                channel: packets::CHANNEL_TUNNEL.into(),
+                                data: tunnel::encode_data(sealed),
+                            }
+                            .encode_sb(),
+                        );
+                    }
+                    self.conn.send_batch(frames).await?;
+                }
+                _ = tick.tick(), if self.cfg.stealth_tick => {
+                    self.conn.send(&packets::PlayerTick { on_ground: true }.encode()).await?;
+                }
+                _ = ping.tick() => {
+                    if let Some(sent) = pending_ping {
+                        if sent.elapsed() > Duration::from_secs(10) {
+                            device.stop_device();
+                            return Err(VpnError::Timeout);
+                        }
+                    }
+                    let v = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as u64;
+                    pending_ping = Some(Instant::now());
+                    let cp = CustomPayload {
+                        channel: packets::CHANNEL_TUNNEL.into(),
+                        data: tunnel::encode_ping(v),
+                    };
+                    self.conn.send(&cp.encode_sb()).await?;
+                }
+                body = self.conn.recv() => {
+                    let body = body?;
+                    match body[0] {
+                        play_id::CB_KEEP_ALIVE => {
+                            let ka = packets::PlayKeepAlive::decode(&body)?;
+                            self.conn.send(&packets::PlayKeepAlive { id: ka.id }.encode()).await?;
+                        }
+                        play_id::CB_CUSTOM_PAYLOAD => {
+                            let cp = CustomPayload::decode_cb(&body)?;
+                            if cp.channel == packets::CHANNEL_TUNNEL {
+                                match tunnel::decode(&cp.data)? {
+                                    tunnel::TunnelMsg::Data(sealed) => {
+                                        let ip_packet = crypto.open(&sealed)?;
+                                        stats.add_down(ip_packet.len() as u64);
+                                        if device.outbox.send(ip_packet).await.is_err() {
+                                            device.stop_device();
+                                            return Err(VpnError::Device("device closed".into()));
+                                        }
+                                    }
+                                    tunnel::TunnelMsg::Pong(_) => {
+                                        if let Some(sent) = pending_ping.take() {
+                                            let rtt = sent.elapsed();
+                                            stats.set_rtt(rtt.as_millis() as u32);
+                                        }
+                                    }
+                                    tunnel::TunnelMsg::Close(_) => {
+                                        device.stop_device();
+                                        return Err(VpnError::Kick("closed by server".into()));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        play_id::CB_DISCONNECT => {
+                            let dc = packets::PlayDisconnect::decode(&body)?;
+                            device.stop_device();
+                            return Err(VpnError::Kick(plain_reason(&dc.reason)));
+                        }
+                        id if play_id::cb_known_1_8(id) => {}
+                        _ => {
+                            tracing::debug!(packet = body[0], "ignoring unknown clientbound packet");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ClientState {
+    Connecting,
+    Connected,
+    Disconnected,
+    Error(String),
+    Waiting(Duration),
+}
+
+/// Continuous client with backoff reconnect (CLI/GUI driver).
+pub async fn run_client(
+    cfg: ClientConfig,
+    device_factory: impl Fn(&TunnelInfo) -> VpnResult<DeviceHandle> + Send + Sync + 'static,
+    mut shutdown: watch::Receiver<bool>,
+    on_state: impl Fn(ClientState),
+) {
+    let mut backoff = Duration::from_millis(500);
+    let device_factory = Arc::new(device_factory);
+    loop {
+        on_state(ClientState::Connecting);
+        match connect(&cfg).await {
+            Ok(sess) => {
+                on_state(ClientState::Connected);
+                backoff = Duration::from_millis(500);
+                let info = sess.info().clone();
+                let (tx, rx) = watch::channel(false);
+                let child_shutdown = rx;
+                let mut fwd_shutdown = shutdown.clone();
+                tokio::spawn(async move {
+                    loop {
+                        if fwd_shutdown.changed().await.is_err() {
+                            break;
+                        }
+                        if *fwd_shutdown.borrow() {
+                            let _ = tx.send(true);
+                            break;
+                        }
+                    }
+                });
+                let device = match device_factory(&info) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        on_state(ClientState::Error(e.to_string()));
+                        return;
+                    }
+                };
+                match sess.attach_device(device, child_shutdown).await {
+                    Ok(()) => {
+                        on_state(ClientState::Disconnected);
+                        return;
+                    }
+                    Err(e) => {
+                        on_state(ClientState::Error(e.to_string()));
+                        if !e.is_retryable() || *shutdown.borrow() {
+                            return;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                on_state(ClientState::Error(e.to_string()));
+                if !e.is_retryable() || *shutdown.borrow() {
+                    return;
+                }
+            }
+        }
+        on_state(ClientState::Waiting(backoff));
+        tokio::select! {
+            _ = tokio::time::sleep(backoff) => {}
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    return;
+                }
+            }
+        }
+        backoff = (backoff * 2).min(Duration::from_secs(30));
+    }
+}

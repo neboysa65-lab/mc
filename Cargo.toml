@@ -25,7 +25,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 toml = "0.8"
-socket2 = "0.5"
+socket2 = { version = "0.5", features = ["all"] }
+libc = "0.2"
 aes = "0.8"
 cipher = "0.4"
 rsa = "0.9"
