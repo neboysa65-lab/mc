@@ -1,0 +1,19 @@
+[package]
+name = "mc-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Minecraft Java Edition 1.8.9 (protocol 47) wire protocol implementation for the mcvpn transport"
+
+[dependencies]
+aes.workspace = true
+cipher.workspace = true
+rsa.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+sha2.workspace = true
+md-5.workspace = true
+flate2.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

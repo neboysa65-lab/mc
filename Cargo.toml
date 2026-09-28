@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mc-protocol",
+    "crates/mcvpn",
+    "crates/mcvpn-gui",
+    "crates/mcvpn-android",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/neboysa65-lab/mc"
+
+[workspace.dependencies]
+thiserror = "2"
+anyhow = "1"
+bytes = "1"
+rand = "0.8"
+rand_core = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "0.8"
+socket2 = "0.5"
+aes = "0.8"
+cipher = "0.4"
+rsa = "0.9"
+sha2 = "0.10"
+md-5 = "0.10"
+hkdf = "0.12"
+aes-gcm = "0.10"
+subtle = "2"
+flate2 = "1"
+clap = { version = "4", features = ["derive"] }
+mc-protocol = { path = "crates/mc-protocol" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

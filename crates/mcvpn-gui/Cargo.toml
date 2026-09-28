@@ -1,0 +1,4 @@
+[package]
+name = "mcvpn-gui"
+version.workspace = true
+edition.workspace = true

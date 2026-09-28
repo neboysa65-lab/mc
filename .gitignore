@@ -1,0 +1,16 @@
+/target
+**/target
+Cargo.lock.bak
+*.so
+*.dll
+*.exe
+*.apk
+*.jks.tmp
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+**/*.iml
+.idea/
+.DS_Store
+.env
