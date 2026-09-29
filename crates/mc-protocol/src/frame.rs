@@ -44,6 +44,24 @@ pub fn encode_frame_into(body: &[u8], threshold: Option<u32>, out: &mut Vec<u8>)
     }
 }
 
+/// Like [`encode_frame_into`], but for bodies that are known to be
+/// incompressible (AEAD ciphertext): frames above the threshold carry a
+/// stored-block zlib stream instead of running deflate. Same wire format and
+/// same size zlib's own incompressible fallback produces; no CPU spent.
+pub fn encode_frame_into_incompressible(body: &[u8], threshold: Option<u32>, out: &mut Vec<u8>) {
+    match threshold {
+        Some(th) if body.len() as u32 >= th => {
+            let dl = varint_size(body.len() as u32);
+            let zlen = compress::stored_zlib_len(body.len());
+            write_varint(out, (dl + zlen) as u32);
+            write_varint(out, body.len() as u32);
+            compress::deflate_stored_into(body, out);
+        }
+        // Below the threshold (or compression off) the format is identical.
+        _ => encode_frame_into(body, threshold, out),
+    }
+}
+
 fn write_varint(out: &mut Vec<u8>, mut v: u32) {
     loop {
         let mut b = (v & 0x7F) as u8;
@@ -206,6 +224,45 @@ mod tests {
         let mut p = FrameParser::new();
         p.push(&frame);
         assert_eq!(p.next_packet(Some(256)).unwrap().unwrap(), body);
+    }
+
+    #[test]
+    fn incompressible_frames_roundtrip_through_the_strict_parser() {
+        // Random-looking bodies at, above and far above the threshold.
+        for n in [255usize, 256, 257, 1300, 1450, 70_000] {
+            let body: Vec<u8> = (0..n).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+            let mut out = Vec::new();
+            encode_frame_into_incompressible(&body, Some(256), &mut out);
+            let mut p = FrameParser::new();
+            p.push(&out);
+            assert_eq!(p.next_packet(Some(256)).unwrap().unwrap(), body, "len {n}");
+            assert!(p.next_packet(Some(256)).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn incompressible_frame_has_the_size_zlib_itself_would_use() {
+        // zlib's fallback for random data is a stored block: the on-wire size
+        // must match what real deflate produces for incompressible input, so
+        // skipping compression changes nothing an observer can measure.
+        use rand::{RngCore, SeedableRng};
+        let mut body = vec![0u8; 1400];
+        rand::rngs::StdRng::seed_from_u64(7).fill_bytes(&mut body);
+        let mut fast = Vec::new();
+        encode_frame_into_incompressible(&body, Some(256), &mut fast);
+        let mut real = Vec::new();
+        encode_frame_into(&body, Some(256), &mut real);
+        let diff = (fast.len() as i64 - real.len() as i64).abs();
+        assert!(diff <= 8, "sizes differ by {diff}: {} vs {}", fast.len(), real.len());
+    }
+
+    #[test]
+    fn below_threshold_is_identical_in_both_encoders() {
+        let body = vec![0x00u8, 1, 2, 3, 4];
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        encode_frame_into(&body, Some(256), &mut a);
+        encode_frame_into_incompressible(&body, Some(256), &mut b);
+        assert_eq!(a, b);
     }
 
     #[test]
