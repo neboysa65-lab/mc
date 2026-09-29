@@ -90,6 +90,7 @@ pub fn from_raw_fd(name: &str, fd: RawFd) -> DeviceHandle {
         outbox: outbox_tx,
         name: name.to_string(),
         stop: None,
+        cleanup: None,
     };
     handle.stop = Some(stop);
     handle

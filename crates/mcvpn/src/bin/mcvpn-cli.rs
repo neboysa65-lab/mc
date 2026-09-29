@@ -107,6 +107,7 @@ fn main() -> anyhow::Result<()> {
 
         let handle = tokio::spawn(client::run_client(
             cfg,
+            stats,
             move |info| factory(info),
             shutdown_rx,
             move |state| match state {

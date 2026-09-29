@@ -3,7 +3,6 @@
 
 use tokio::sync::mpsc;
 
-#[derive(Debug)]
 pub struct DeviceHandle {
     /// Packets read from the device (ready to be sent into the tunnel).
     pub inbox: mpsc::Receiver<Vec<u8>>,
@@ -11,6 +10,8 @@ pub struct DeviceHandle {
     pub outbox: mpsc::Sender<Vec<u8>>,
     pub name: String,
     pub(crate) stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Platform cleanup (e.g. Windows route removal) run when the handle drops.
+    pub(crate) cleanup: Option<Box<dyn FnOnce() + Send>>,
 }
 
 pub mod fd;
@@ -41,5 +42,9 @@ impl DeviceHandle {
 impl Drop for DeviceHandle {
     fn drop(&mut self) {
         self.stop_device();
+        if let Some(c) = self.cleanup.take() {
+            c();
+        }
     }
 }
+

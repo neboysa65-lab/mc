@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 pub fn mock_pair() -> (DeviceHandle, DeviceHandle) {
     let (a_to_b_tx, b_inbox) = mpsc::channel(256);
     let (b_to_a_tx, a_inbox) = mpsc::channel(256);
-    let a = DeviceHandle { inbox: a_inbox, outbox: a_to_b_tx, name: "mock-a".into(), stop: None };
-    let b = DeviceHandle { inbox: b_inbox, outbox: b_to_a_tx, name: "mock-b".into(), stop: None };
+    let a = DeviceHandle { inbox: a_inbox, outbox: a_to_b_tx, name: "mock-a".into(), stop: None, cleanup: None };
+    let b = DeviceHandle { inbox: b_inbox, outbox: b_to_a_tx, name: "mock-b".into(), stop: None, cleanup: None };
     (a, b)
 }
 

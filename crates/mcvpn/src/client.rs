@@ -44,6 +44,12 @@ pub fn plain_reason(json: &str) -> String {
 /// Perform the full Minecraft login + tunnel auth. On success the caller
 /// creates the local device using `info` and calls `attach_device`.
 pub async fn connect(cfg: &ClientConfig) -> VpnResult<Connected> {
+    connect_with_stats(cfg, Arc::new(Stats::default())).await
+}
+
+/// Same as [`connect`] but reports into a caller-provided stats holder
+/// (GUIs and drivers observe live numbers).
+pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnResult<Connected> {
     let addr: SocketAddr = format!("{}:{}", cfg.server, cfg.port).parse().map_err(|_| {
         VpnError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -126,7 +132,6 @@ pub async fn connect(cfg: &ClientConfig) -> VpnResult<Connected> {
     };
     conn.send(&auth.encode_sb()).await?;
 
-    let stats: SharedStats = Arc::new(Stats::default());
     let deadline = Duration::from_secs(10);
     let start = Instant::now();
     let (crypto, info) = loop {
@@ -307,6 +312,7 @@ pub enum ClientState {
 /// Continuous client with backoff reconnect (CLI/GUI driver).
 pub async fn run_client(
     cfg: ClientConfig,
+    stats: SharedStats,
     device_factory: impl Fn(&TunnelInfo) -> VpnResult<DeviceHandle> + Send + Sync + 'static,
     mut shutdown: watch::Receiver<bool>,
     on_state: impl Fn(ClientState),
@@ -315,7 +321,7 @@ pub async fn run_client(
     let device_factory = Arc::new(device_factory);
     loop {
         on_state(ClientState::Connecting);
-        match connect(&cfg).await {
+        match connect_with_stats(&cfg, Arc::clone(&stats)).await {
             Ok(sess) => {
                 on_state(ClientState::Connected);
                 backoff = Duration::from_millis(500);
