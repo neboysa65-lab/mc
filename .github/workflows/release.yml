@@ -1,6 +1,12 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: false
+        default: ""
   push:
     tags: ["v*"]
 
@@ -113,7 +119,7 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           gh release create "$TAG" --title "mcvpn $TAG" --generate-notes || true
           gh release upload "$TAG" dist/mcvpn-server-linux-amd64.tar.gz dist/mcvpn-server-linux-arm64.tar.gz dist/mcvpn-windows-x64.zip dist/mcvpn-android.apk --clobber

@@ -95,7 +95,12 @@ impl Handshake {
         if next_state != 1 && next_state != 2 {
             return Err(McError::new("invalid next state in handshake"));
         }
-        Ok(Handshake { protocol_version, host, port, next_state })
+        Ok(Handshake {
+            protocol_version,
+            host,
+            port,
+            next_state,
+        })
     }
 
     pub fn is_supported_version(&self) -> bool {
@@ -222,10 +227,7 @@ impl LoginStart {
 
 /// Vanilla online-mode name rule: [a-zA-Z0-9_], length 1..=16.
 pub fn is_valid_username(name: &str) -> bool {
-    (1..=16).contains(&name.len())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    (1..=16).contains(&name.len()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[derive(Debug, Clone)]
@@ -254,7 +256,11 @@ impl EncryptionRequest {
         let public_key = r.array_short(8192)?;
         let verify_token = r.array_short(512)?;
         r.assert_end()?;
-        Ok(EncryptionRequest { server_id, public_key, verify_token })
+        Ok(EncryptionRequest {
+            server_id,
+            public_key,
+            verify_token,
+        })
     }
 }
 
@@ -281,7 +287,10 @@ impl EncryptionResponse {
         let shared_secret = r.array_short(512)?;
         let verify_token = r.array_short(512)?;
         r.assert_end()?;
-        Ok(EncryptionResponse { shared_secret, verify_token })
+        Ok(EncryptionResponse {
+            shared_secret,
+            verify_token,
+        })
     }
 }
 
@@ -493,7 +502,13 @@ impl ClientSettings {
         let chat_colors = r.boolean()?;
         let skin_parts = r.u8()?;
         r.assert_end()?;
-        Ok(ClientSettings { locale, view_distance, chat_flags, chat_colors, skin_parts })
+        Ok(ClientSettings {
+            locale,
+            view_distance,
+            chat_flags,
+            chat_colors,
+            skin_parts,
+        })
     }
 }
 
@@ -607,7 +622,9 @@ pub mod kick {
         json(&format!("Outdated client! I'm running {VERSION_NAME}"))
     }
     pub fn outdated_server() -> String {
-        json(&format!("Outdated server! I'm still running {VERSION_NAME}"))
+        json(&format!(
+            "Outdated server! I'm still running {VERSION_NAME}"
+        ))
     }
     pub fn timed_out() -> String {
         json("Timed out")
@@ -643,8 +660,8 @@ mod tests {
         assert_eq!(
             frame,
             vec![
-                0x0F, 0x00, 0x2F, 0x09, b'1', b'2', b'7', b'.', b'0', b'.', b'0', b'.', b'1',
-                0x63, 0xDD, 0x01
+                0x0F, 0x00, 0x2F, 0x09, b'1', b'2', b'7', b'.', b'0', b'.', b'0', b'.', b'1', 0x63,
+                0xDD, 0x01
             ]
         );
         let back = Handshake::decode(&body).unwrap();
@@ -655,7 +672,9 @@ mod tests {
 
     #[test]
     fn login_start_roundtrip_and_validation() {
-        let p = LoginStart { name: "xK9_mZq4".into() };
+        let p = LoginStart {
+            name: "xK9_mZq4".into(),
+        };
         let dec = LoginStart::decode(&p.encode()).unwrap();
         assert_eq!(dec.name, "xK9_mZq4");
         assert!(!is_valid_username("bad name"));

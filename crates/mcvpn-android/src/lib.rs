@@ -45,7 +45,9 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 }
 
 fn jstr(env: &mut JNIEnv, s: &str) -> jstring {
-    env.new_string(s).map(|j| j.into_raw()).unwrap_or(std::ptr::null_mut())
+    env.new_string(s)
+        .map(|j| j.into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }
 
 fn reason(e: &VpnError) -> String {
@@ -93,11 +95,18 @@ pub extern "system" fn Java_com_mcvpn_client_TunnelService_nativeConnect(
     match result {
         Ok(Ok(connected)) => {
             let info = connected.info().clone();
-            let ip = format!("{}.{}.{}.{}", info.ip[0], info.ip[1], info.ip[2], info.ip[3]);
-            let gw =
-                format!("{}.{}.{}.{}", info.gateway[0], info.gateway[1], info.gateway[2], info.gateway[3]);
-            let mask =
-                format!("{}.{}.{}.{}", info.netmask[0], info.netmask[1], info.netmask[2], info.netmask[3]);
+            let ip = format!(
+                "{}.{}.{}.{}",
+                info.ip[0], info.ip[1], info.ip[2], info.ip[3]
+            );
+            let gw = format!(
+                "{}.{}.{}.{}",
+                info.gateway[0], info.gateway[1], info.gateway[2], info.gateway[3]
+            );
+            let mask = format!(
+                "{}.{}.{}.{}",
+                info.netmask[0], info.netmask[1], info.netmask[2], info.netmask[3]
+            );
             let dns: Vec<String> = info
                 .dns
                 .iter()
@@ -114,8 +123,11 @@ pub extern "system" fn Java_com_mcvpn_client_TunnelService_nativeConnect(
                 "dns": dns,
             })
             .to_string();
-            *SESSION.lock().unwrap() =
-                Some(AndroidSession { connected: Some(connected), driver: None, stats });
+            *SESSION.lock().unwrap() = Some(AndroidSession {
+                connected: Some(connected),
+                driver: None,
+                stats,
+            });
             STATE.store(2, Ordering::Relaxed);
             jstr(&mut env, &json)
         }
@@ -152,7 +164,10 @@ pub extern "system" fn Java_com_mcvpn_client_TunnelService_nativeStart(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_mcvpn_client_TunnelService_nativeStop(_env: JNIEnv, _class: JClass) {
+pub extern "system" fn Java_com_mcvpn_client_TunnelService_nativeStop(
+    _env: JNIEnv,
+    _class: JClass,
+) {
     let mut guard = SESSION.lock().unwrap();
     if let Some(session) = guard.as_mut() {
         if let Some((tx, handle)) = session.driver.take() {

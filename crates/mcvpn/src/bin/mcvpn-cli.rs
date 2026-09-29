@@ -80,7 +80,11 @@ fn main() -> anyhow::Result<()> {
                     "up {} KB/s  down {} KB/s  rtt {}ms",
                     up / 1024,
                     down / 1024,
-                    if s.rtt_ms == 0 { String::from("-") } else { s.rtt_ms.to_string() }
+                    if s.rtt_ms == 0 {
+                        String::from("-")
+                    } else {
+                        s.rtt_ms.to_string()
+                    }
                 );
             }
         });
@@ -96,7 +100,11 @@ fn main() -> anyhow::Result<()> {
                     let ip = std::net::Ipv4Addr::from(info.ip);
                     let mask = std::net::Ipv4Addr::from(info.netmask);
                     let prefix = u32::from(mask).count_ones() as u8;
-                    Ok(device::tun::open("mcvpnc0", &format!("{ip}/{prefix}"), info.mtu)?)
+                    Ok(device::tun::open(
+                        "mcvpnc0",
+                        &format!("{ip}/{prefix}"),
+                        info.mtu,
+                    )?)
                 }
                 #[cfg(not(target_os = "linux"))]
                 Err(mcvpn::VpnError::Device(

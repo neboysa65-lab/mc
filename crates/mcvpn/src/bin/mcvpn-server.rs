@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use tokio::sync::watch;
 
 #[derive(Parser, Debug)]
-#[command(name = "mcvpn-server", about = "Minecraft-camouflaged VPN server (port 25565)")]
+#[command(
+    name = "mcvpn-server",
+    about = "Minecraft-camouflaged VPN server (port 25565)"
+)]
 struct Args {
     /// Path to server.toml
     #[arg(long, default_value = "/etc/mcvpn/server.toml")]
@@ -84,7 +87,7 @@ fn main() -> anyhow::Result<()> {
             }
         });
 
-    if setup_nat {
+        if setup_nat {
             #[cfg(target_os = "linux")]
             match nat::setup(&cidr, "mcvpn0") {
                 Ok(()) => tracing::info!("NAT configured (iptables MASQUERADE + FORWARD)"),

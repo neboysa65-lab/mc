@@ -106,7 +106,10 @@ impl App {
         if let Some(parent) = self.config_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(&self.config_path, toml::to_string_pretty(&cfg).unwrap_or_default());
+        let _ = std::fs::write(
+            &self.config_path,
+            toml::to_string_pretty(&cfg).unwrap_or_default(),
+        );
     }
 
     fn connect(&mut self) {
@@ -139,43 +142,50 @@ impl App {
                     .expect("tokio runtime");
                 rt.block_on(async move {
                     client::run_client(
-                    cfg,
-                    stats_driver,
-                    move |info: &TunnelInfo| -> mcvpn::VpnResult<device::DeviceHandle> {
-                        if mock {
-                            let (a, _b) = device::mock::mock_pair();
-                            Ok(a)
-                        } else {
-                            #[cfg(target_os = "windows")]
-                            return device::wintun::open(info);
-                            #[cfg(not(target_os = "windows"))]
-                            {
-                                let ip = std::net::Ipv4Addr::from(info.ip);
-                                let mask = std::net::Ipv4Addr::from(info.netmask);
-                                let prefix = u32::from(mask).count_ones() as u8;
-                                device::tun::open("mcvpnc0", &format!("{ip}/{prefix}"), info.mtu)
+                        cfg,
+                        stats_driver,
+                        move |info: &TunnelInfo| -> mcvpn::VpnResult<device::DeviceHandle> {
+                            if mock {
+                                let (a, _b) = device::mock::mock_pair();
+                                Ok(a)
+                            } else {
+                                #[cfg(target_os = "windows")]
+                                return device::wintun::open(info);
+                                #[cfg(not(target_os = "windows"))]
+                                {
+                                    let ip = std::net::Ipv4Addr::from(info.ip);
+                                    let mask = std::net::Ipv4Addr::from(info.netmask);
+                                    let prefix = u32::from(mask).count_ones() as u8;
+                                    device::tun::open(
+                                        "mcvpnc0",
+                                        &format!("{ip}/{prefix}"),
+                                        info.mtu,
+                                    )
+                                }
                             }
-                        }
-                    },
-                    shutdown_rx,
-                    move |s| match s {
-                        ClientState::Connecting => *state.lock().unwrap() = UiState::Connecting,
-                        ClientState::Connected => *state.lock().unwrap() = UiState::Connected,
-                        ClientState::Disconnected => {
-                            *state.lock().unwrap() = UiState::Disconnected
-                        }
-                        ClientState::Error(e) => {
-                            *state.lock().unwrap() = UiState::Error(e.clone())
-                        }
-                        ClientState::Waiting(_) => {}
-                    },
+                        },
+                        shutdown_rx,
+                        move |s| match s {
+                            ClientState::Connecting => *state.lock().unwrap() = UiState::Connecting,
+                            ClientState::Connected => *state.lock().unwrap() = UiState::Connected,
+                            ClientState::Disconnected => {
+                                *state.lock().unwrap() = UiState::Disconnected
+                            }
+                            ClientState::Error(e) => {
+                                *state.lock().unwrap() = UiState::Error(e.clone())
+                            }
+                            ClientState::Waiting(_) => {}
+                        },
                     )
                     .await;
                 });
             })
             .expect("spawn driver");
         let _ = thread; // detaches; the OS cleans up when the app exits
-        self.driver = Some(Driver { shutdown: shutdown_tx, stats });
+        self.driver = Some(Driver {
+            shutdown: shutdown_tx,
+            stats,
+        });
     }
 
     fn disconnect(&mut self) {
@@ -191,7 +201,11 @@ impl App {
             let dt = self.last_poll.elapsed().as_secs_f64().max(0.001);
             self.up_rate = (snap.up_bytes - self.last_stats.0) as f64 / dt;
             self.down_rate = (snap.down_bytes - self.last_stats.1) as f64 / dt;
-            self.rtt_ms = if snap.rtt_ms == 0 { None } else { Some(snap.rtt_ms) };
+            self.rtt_ms = if snap.rtt_ms == 0 {
+                None
+            } else {
+                Some(snap.rtt_ms)
+            };
             self.last_stats = (snap.up_bytes, snap.down_bytes);
             self.last_poll = Instant::now();
         }
@@ -241,7 +255,10 @@ impl eframe::App for App {
                 match state {
                     UiState::Connected => {
                         if ui
-                            .add(egui::Button::new(egui::RichText::new("DISCONNECT").strong()).min_size(egui::vec2(160.0, 34.0)))
+                            .add(
+                                egui::Button::new(egui::RichText::new("DISCONNECT").strong())
+                                    .min_size(egui::vec2(160.0, 34.0)),
+                            )
                             .clicked()
                         {
                             self.disconnect();
@@ -257,7 +274,10 @@ impl eframe::App for App {
                         ));
                     }
                     UiState::Connecting => {
-                        ui.add_enabled(false, egui::Button::new("CONNECTING...").min_size(egui::vec2(160.0, 34.0)));
+                        ui.add_enabled(
+                            false,
+                            egui::Button::new("CONNECTING...").min_size(egui::vec2(160.0, 34.0)),
+                        );
                     }
                     _ => {
                         if ui
@@ -280,7 +300,9 @@ impl eframe::App for App {
                     _ => egui::Color32::from_rgb(120, 120, 130),
                 };
                 ui.horizontal(|ui| {
-                    ui.ctx().style_mut(|s| s.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, color));
+                    ui.ctx().style_mut(|s| {
+                        s.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, color)
+                    });
                     let text = match &state {
                         UiState::Idle => "● idle".into(),
                         UiState::Connecting => "● connecting...".into(),
@@ -328,17 +350,30 @@ fn cli_mode(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .server
         .or_else(|| std::env::var("MCVPN_SERVER").ok())
         .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "--server required in --cli mode")
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--server required in --cli mode",
+            )
         })?;
     let token = args
         .token
         .or_else(|| std::env::var("MCVPN_TOKEN").ok())
         .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "--token required in --cli mode")
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--token required in --cli mode",
+            )
         })?;
-    let cfg = ClientConfig { server, port: args.port, token, ..Default::default() };
+    let cfg = ClientConfig {
+        server,
+        port: args.port,
+        token,
+        ..Default::default()
+    };
     let mock = args.mock_device || std::env::var("MCVPN_MOCK_DEVICE").is_ok();
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let stats: SharedStats = Arc::new(mcvpn::stats::Stats::default());
@@ -352,7 +387,11 @@ fn cli_mode(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     "up {} KB/s  down {} KB/s  rtt {}ms",
                     (s.up_bytes - last.0) / 1024,
                     (s.down_bytes - last.1) / 1024,
-                    if s.rtt_ms == 0 { String::from("-") } else { s.rtt_ms.to_string() }
+                    if s.rtt_ms == 0 {
+                        String::from("-")
+                    } else {
+                        s.rtt_ms.to_string()
+                    }
                 );
                 last = (s.up_bytes, s.down_bytes);
             }

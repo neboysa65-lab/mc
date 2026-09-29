@@ -16,7 +16,9 @@ impl Default for Writer {
 
 impl Writer {
     pub fn new() -> Self {
-        Writer { out: Vec::with_capacity(64) }
+        Writer {
+            out: Vec::with_capacity(64),
+        }
     }
 
     pub fn u8(&mut self, v: u8) {
@@ -83,7 +85,10 @@ impl Writer {
 
     /// Short-prefixed byte array (used by login encryption packets in 1.8).
     pub fn array_short(&mut self, b: &[u8]) {
-        assert!(b.len() <= u16::MAX as usize, "array too long for wire format");
+        assert!(
+            b.len() <= u16::MAX as usize,
+            "array too long for wire format"
+        );
         self.u16(b.len() as u16);
         self.out.extend_from_slice(b);
     }
@@ -199,8 +204,7 @@ impl<'a> Reader<'a> {
             return Err(McError::new("string too long"));
         }
         let bytes = self.take(len)?;
-        String::from_utf8(bytes.to_vec())
-            .map_err(|_| McError::new("invalid UTF-8 in string"))
+        String::from_utf8(bytes.to_vec()).map_err(|_| McError::new("invalid UTF-8 in string"))
     }
 
     pub fn take(&mut self, n: usize) -> crate::error::McResult<&'a [u8]> {

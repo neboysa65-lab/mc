@@ -25,7 +25,11 @@ impl McCipher {
         // Minecraft quirk: IV equals the key.
         let key = Block16::from(*shared_secret);
         let aes = Aes128::new(&key);
-        McCipher { aes, iv: key, encrypting }
+        McCipher {
+            aes,
+            iv: key,
+            encrypting,
+        }
     }
 
     /// Transform data in place, advancing the CFB8 feedback state.
@@ -57,7 +61,8 @@ mod tests {
         let secret = *b"0123456789abcdef";
         let mut enc = McCipher::new(&secret, true);
         let mut data =
-            b"The quick brown fox jumps over the lazy dog. CFB8 keystream check 0123456789".to_vec();
+            b"The quick brown fox jumps over the lazy dog. CFB8 keystream check 0123456789"
+                .to_vec();
         enc.process(&mut data);
         assert_eq!(
             hex(&data),
@@ -67,7 +72,8 @@ mod tests {
         dec.process(&mut data);
         assert_eq!(
             data,
-            b"The quick brown fox jumps over the lazy dog. CFB8 keystream check 0123456789".to_vec()
+            b"The quick brown fox jumps over the lazy dog. CFB8 keystream check 0123456789"
+                .to_vec()
         );
         let mut small = b"abc".to_vec();
         McCipher::new(&secret, true).process(&mut small);

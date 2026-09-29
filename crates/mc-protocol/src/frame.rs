@@ -72,7 +72,10 @@ impl Default for FrameParser {
 
 impl FrameParser {
     pub fn new() -> Self {
-        FrameParser { buf: Vec::with_capacity(16 * 1024), start: 0 }
+        FrameParser {
+            buf: Vec::with_capacity(16 * 1024),
+            start: 0,
+        }
     }
 
     pub fn push(&mut self, chunk: &[u8]) {
@@ -94,10 +97,7 @@ impl FrameParser {
     }
 
     /// Try to extract one packet body. Ok(None) = need more bytes.
-    pub fn next_packet(
-        &mut self,
-        threshold: Option<u32>,
-    ) -> Result<Option<Vec<u8>>, McError> {
+    pub fn next_packet(&mut self, threshold: Option<u32>) -> Result<Option<Vec<u8>>, McError> {
         let avail = self.buffered();
         if avail == 0 {
             self.compact();
@@ -150,9 +150,7 @@ impl FrameParser {
                     Ok(Some(payload.to_vec()))
                 } else {
                     if (dl as u32) < th {
-                        return Err(McError::new(
-                            "claimed uncompressed size below threshold",
-                        ));
+                        return Err(McError::new("claimed uncompressed size below threshold"));
                     }
                     if dl as usize > MAX_UNCOMPRESSED {
                         return Err(McError::new("uncompressed size exceeds hard cap"));

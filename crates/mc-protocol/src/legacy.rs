@@ -92,7 +92,10 @@ mod tests {
 
     #[test]
     fn detect_kinds() {
-        assert!(matches!(detect(0xFE, Some(0x01)), Some(LegacyProbe::Ping(true))));
+        assert!(matches!(
+            detect(0xFE, Some(0x01)),
+            Some(LegacyProbe::Ping(true))
+        ));
         assert!(matches!(detect(0xFE, None), Some(LegacyProbe::Ping(false))));
         assert!(matches!(detect(0x02, None), Some(LegacyProbe::Handshake)));
         assert!(detect(0x0F, None).is_none()); // normal VarInt frame start

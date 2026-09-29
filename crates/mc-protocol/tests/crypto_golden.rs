@@ -23,10 +23,23 @@ fn unhex(s: &str) -> Vec<u8> {
 fn offline_uuid_matches_java() {
     // UUID.nameUUIDFromBytes("OfflinePlayer:Notch".getBytes())
     let dash = |h: &str| -> String {
-        format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+        format!(
+            "{}-{}-{}-{}-{}",
+            &h[0..8],
+            &h[8..12],
+            &h[12..16],
+            &h[16..20],
+            &h[20..32]
+        )
     };
-    assert_eq!(offline_uuid_string("Notch"), dash("b50ad385829d3141a2167e7d7539ba7f"));
-    assert_eq!(offline_uuid_string("xK9_mZq4"), dash("4fc89ba6f70338208d38c13f0130be54"));
+    assert_eq!(
+        offline_uuid_string("Notch"),
+        dash("b50ad385829d3141a2167e7d7539ba7f")
+    );
+    assert_eq!(
+        offline_uuid_string("xK9_mZq4"),
+        dash("4fc89ba6f70338208d38c13f0130be54")
+    );
 }
 
 #[test]

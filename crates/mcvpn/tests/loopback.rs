@@ -4,12 +4,12 @@
 //! compression, play state, plugin channel REGISTER, MW|Tunnel auth, and
 //! bidirectional sealed IP packet transfer.
 
+use mc_protocol::frame::encode_frame;
+use mc_protocol::packets::{Handshake, Ping, StatusRequest};
 use mcvpn::client;
 use mcvpn::config::{ClientConfig, ServerConfig};
 use mcvpn::device::mock::mock_pair;
 use mcvpn::device::DeviceHandle;
-use mc_protocol::frame::encode_frame;
-use mc_protocol::packets::{Handshake, Ping, StatusRequest};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -115,9 +115,8 @@ async fn full_loopback_bidirectional_transfer() {
     let (client_dev, mut client_os_side) = mock_pair();
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let stats = sess.stats();
-    let session_task = tokio::spawn(async move {
-        sess.attach_device(client_dev, shutdown_rx).await
-    });
+    let session_task =
+        tokio::spawn(async move { sess.attach_device(client_dev, shutdown_rx).await });
 
     // Client -> tunnel -> server TUN ("internet").
     let out = fake_ip(info.ip, [1, 2, 3, 4], b"hello from client");
@@ -149,7 +148,9 @@ async fn full_loopback_bidirectional_transfer() {
 
     // Client #2: client #1 released its IP on shutdown, so the pool
     // hands the lowest free address out again.
-    let sess2 = client::connect(&client_cfg(port, "test-token-123")).await.expect("second client");
+    let sess2 = client::connect(&client_cfg(port, "test-token-123"))
+        .await
+        .expect("second client");
     assert_eq!(sess2.info().ip, [100, 64, 0, 2]);
 }
 
@@ -165,13 +166,23 @@ async fn slp_status_ping_golden() {
         port,
         next_state: 1,
     };
-    s.write_all(&encode_frame(&hs.encode(), None)).await.unwrap();
-    s.write_all(&encode_frame(&StatusRequest.encode(), None)).await.unwrap();
+    s.write_all(&encode_frame(&hs.encode(), None))
+        .await
+        .unwrap();
+    s.write_all(&encode_frame(&StatusRequest.encode(), None))
+        .await
+        .unwrap();
 
     let expected_json = mc_protocol::slp::status_json("A Minecraft Server", 0, 20);
-    let expected = mc_protocol::packets::StatusResponse { json: expected_json }.encode();
+    let expected = mc_protocol::packets::StatusResponse {
+        json: expected_json,
+    }
+    .encode();
     let got = read_frame(&mut s).await;
-    assert_eq!(got, expected, "status response must match a vanilla 1.8.9 server byte-for-byte");
+    assert_eq!(
+        got, expected,
+        "status response must match a vanilla 1.8.9 server byte-for-byte"
+    );
 
     // Ping -> pong echo (i64 timestamp).
     let ping_time = 0x0123_4567_89AB_CDEFi64;
@@ -192,7 +203,10 @@ async fn legacy_ping_golden() {
     let expected = mc_protocol::legacy::ping_response_v15("A Minecraft Server", 0, 20);
     let mut got = vec![0u8; expected.len()];
     s.read_exact(&mut got).await.unwrap();
-    assert_eq!(got, expected, "legacy ping response must match vanilla 1.8.9");
+    assert_eq!(
+        got, expected,
+        "legacy ping response must match vanilla 1.8.9"
+    );
 }
 
 #[tokio::test]
@@ -215,13 +229,18 @@ async fn oversized_frame_is_rejected() {
     let _internet = spawn_server(test_server_cfg(port)).await;
     let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     // 4-byte varint length prefix: wider than the 21-bit limit.
-    s.write_all(&[0x80, 0x80, 0x80, 0x80, 0x01, 0xAA]).await.unwrap();
+    s.write_all(&[0x80, 0x80, 0x80, 0x80, 0x01, 0xAA])
+        .await
+        .unwrap();
     let mut buf = [0u8; 8];
     let n = tokio::time::timeout(Duration::from_secs(10), s.read(&mut buf))
         .await
         .expect("read timeout")
         .unwrap();
-    assert_eq!(n, 0, "server must close on a wider-than-21-bit length varint");
+    assert_eq!(
+        n, 0,
+        "server must close on a wider-than-21-bit length varint"
+    );
 }
 
 #[tokio::test]
@@ -230,7 +249,9 @@ async fn unknown_host_state_closed() {
     let _internet = spawn_server(test_server_cfg(port)).await;
     let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     // Valid handshake frame but garbage body: server must close, not hang.
-    s.write_all(&encode_frame(&[0x00, 0xFF, 0xFF], None)).await.unwrap();
+    s.write_all(&encode_frame(&[0x00, 0xFF, 0xFF], None))
+        .await
+        .unwrap();
     let mut buf = [0u8; 8];
     let n = tokio::time::timeout(Duration::from_secs(10), s.read(&mut buf))
         .await
@@ -262,7 +283,9 @@ async fn read_frame(s: &mut TcpStream) -> Vec<u8> {
 async fn throughput_smoke() {
     let port = free_port().await;
     let mut internet = spawn_server(test_server_cfg(port)).await;
-    let sess = client::connect(&client_cfg(port, "test-token-123")).await.unwrap();
+    let sess = client::connect(&client_cfg(port, "test-token-123"))
+        .await
+        .unwrap();
     let info = sess.info().clone();
     let (client_dev, client_os_side) = mock_pair();
     let (_tx, shutdown_rx) = watch::channel(false);
@@ -285,7 +308,12 @@ async fn throughput_smoke() {
     let mut sent = 0;
     while sent < 2000 {
         // Fill the inbox like a TUN reader thread would (burst, not tickle).
-        while sent < 2000 && client_os_side.outbox.try_send(fake_ip(info.ip, [8, 8, 8, 8], &payload)).is_ok() {
+        while sent < 2000
+            && client_os_side
+                .outbox
+                .try_send(fake_ip(info.ip, [8, 8, 8, 8], &payload))
+                .is_ok()
+        {
             sent += 1;
         }
         tokio::task::yield_now().await;

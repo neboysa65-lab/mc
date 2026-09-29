@@ -5,8 +5,8 @@
 use crate::cipher::SHARED_SECRET_LEN;
 use crate::error::{McError, McResult};
 use md5::{Digest, Md5};
-use rand_core::CryptoRngCore;
 use rand::rngs::OsRng;
+use rand_core::CryptoRngCore;
 use rsa::pkcs8::{DecodePublicKey, EncodePublicKey};
 use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 
@@ -24,7 +24,10 @@ impl ServerRsaKey {
             .expect("SPKI encode failed")
             .as_bytes()
             .to_vec();
-        ServerRsaKey { private, public_der }
+        ServerRsaKey {
+            private,
+            public_der,
+        }
     }
 
     pub fn generate(bits: usize, rng: &mut impl CryptoRngCore) -> McResult<Self> {
@@ -36,7 +39,10 @@ impl ServerRsaKey {
             .map_err(|e| McError::new(format!("SPKI encode failed: {e}")))?
             .as_bytes()
             .to_vec();
-        Ok(ServerRsaKey { private, public_der })
+        Ok(ServerRsaKey {
+            private,
+            public_der,
+        })
     }
 
     pub fn public_key_der(&self) -> &[u8] {
@@ -115,8 +121,7 @@ mod tests {
         let token = [0xABu8; 4];
         let (enc_secret, enc_token) =
             client_encrypt_response(server.public_key_der(), &secret, &token, &mut rng).unwrap();
-        let (dec_secret, dec_token) =
-            server.decrypt_response(&enc_secret, &enc_token).unwrap();
+        let (dec_secret, dec_token) = server.decrypt_response(&enc_secret, &enc_token).unwrap();
         assert_eq!(dec_secret, secret);
         assert_eq!(dec_token, token);
     }
