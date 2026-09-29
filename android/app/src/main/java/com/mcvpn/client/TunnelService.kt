@@ -12,7 +12,7 @@ import org.json.JSONObject
 class TunnelService : VpnService() {
     companion object {
         init {
-+            System.loadLibrary("mcvpn")
+            System.loadLibrary("mcvpn")
         }
         @Volatile var running = false
         @Volatile var lastStats = "{}"
