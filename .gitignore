@@ -14,3 +14,4 @@ android/local.properties
 .idea/
 .DS_Store
 .env
+dist/
