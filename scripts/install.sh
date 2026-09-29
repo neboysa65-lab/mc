@@ -95,8 +95,10 @@ if [ "$(ps -p 1 -o comm= 2>/dev/null)" = "systemd" ] && command -v systemctl >/d
   fi
   echo "    mcvpn.service active (logs: journalctl -u mcvpn -f)"
   # Server startup diagnostics: TUN data-plane self-test + NAT outcome.
-  sleep 1
-  SELFTEST="$(journalctl -u mcvpn -n 40 --no-pager 2>/dev/null | grep -m1 "TUN self-test" || true)"
+  # --since: only THIS start's lines (an old journal error must not be
+  # shown as the verdict of a fresh, healthy start).
+  sleep 4
+  SELFTEST="$(journalctl -u mcvpn --since "2 minutes ago" --no-pager 2>/dev/null | grep -m1 "TUN self-test" || true)"
   if [ -n "$SELFTEST" ]; then
     echo "    $SELFTEST"
     case "$SELFTEST" in
@@ -107,7 +109,7 @@ if [ "$(ps -p 1 -o comm= 2>/dev/null)" = "systemd" ] && command -v systemctl >/d
          echo "    !!! TUN networking (LXC/OpenVZ containers often do not)." ;;
     esac
   fi
-  NATLINE="$(journalctl -u mcvpn -n 40 --no-pager 2>/dev/null | grep -m1 "NAT" || true)"
+  NATLINE="$(journalctl -u mcvpn --since "2 minutes ago" --no-pager 2>/dev/null | grep -m1 "NAT" || true)"
   [ -n "$NATLINE" ] && echo "    $NATLINE"
 else
   echo "    systemd not detected (container?) — starting under nohup instead"

@@ -85,34 +85,63 @@ pub async fn run(
     });
 
     let mut dev = device;
-    // TUN data-plane self-test: write an ICMP echo to our own gateway
-    // address through the TUN and wait for the kernel's reply to come back
-    // through it. This exercises the exact path client packets take
-    // (fd writer -> kernel -> fd reader) BEFORE any client connects, so a
-    // broken kernel/container setup is loud in the logs instead of showing
-    // up as "connected but no internet".
+    // TUN data-plane self-test: ping our own gateway address through the TUN
+    // and wait for the kernel's echo reply to come back through it. This
+    // exercises the exact path client packets take (fd writer -> kernel ->
+    // fd reader) BEFORE any client connects, so a broken kernel/container
+    // setup is loud in the logs instead of showing up as "connected but no
+    // internet".
     if !cfg.mock_device {
         let gw = pool.gateway();
-        let probe = crate::probe::icmp_echo_request(gw.octets(), gw.octets(), 0x6D63, 1);
+        // Source must look like a client: a packet whose source equals a
+        // local address is a martian, and the kernel drops it silently.
+        let src = Ipv4Addr::from(u32::from(gw) + 1);
+        let probe = crate::probe::icmp_echo_request(src.octets(), gw.octets(), 0x6D63, 1);
         let _ = dev.outbox.send(probe).await;
-        match tokio::time::timeout(Duration::from_secs(3), dev.inbox.recv()).await {
-            Ok(Some(pkt)) if pkt.len() > 20 && pkt[20] == 0 => {
-                tracing::info!("TUN self-test: OK (kernel returned our probe via TUN)");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut ok = false;
+        let mut noise = 0u32;
+        let mut detail = "timeout: no ICMP echo reply via TUN within 3s".to_string();
+        while let Some(remain) = deadline.checked_duration_since(Instant::now()) {
+            match tokio::time::timeout(remain, dev.inbox.recv()).await {
+                // Accept only OUR IPv4 ICMP echo reply; skip other traffic
+                // (IPv6/martian noise, a reconnecting client's packets).
+                Ok(Some(pkt))
+                    if pkt.len() > 28
+                        && pkt[0] >> 4 == 4
+                        && pkt[20] == 0
+                        && pkt[24] == 0x6D
+                        && pkt[25] == 0x63 =>
+                {
+                    ok = true;
+                    break;
+                }
+                Ok(Some(_)) => {
+                    noise += 1;
+                    continue;
+                }
+                Ok(None) => {
+                    detail = "device closed".into();
+                    break;
+                }
+                Err(_) => {
+                    detail = format!(
+                        "timeout: no ICMP echo reply via TUN within 3s ({noise} other packets seen)"
+                    );
+                    break;
+                }
             }
-            other => {
-                let detail = match other {
-                    Ok(Some(p)) => format!("unexpected packet ({} bytes)", p.len()),
-                    Ok(None) => "device closed".into(),
-                    Err(_) => "timeout: no reply from kernel via TUN within 3s".into(),
-                };
-                let iface = dev_name(&cfg);
-                tracing::error!(
-                    "TUN self-test FAILED ({detail}). Packets written to the TUN are not \
-                     returned by the kernel: clients will connect but have no internet. \
-                     Check: `ip addr show {iface}` and `ip link show {iface}`, and whether \
-                     this VPS fully supports TUN networking (containers/OpenVZ often do not)."
-                );
-            }
+        }
+        if ok {
+            tracing::info!("TUN self-test: OK (kernel answered our probe via the TUN)");
+        } else {
+            let iface = dev_name(&cfg);
+            tracing::error!(
+                "TUN self-test FAILED ({detail}). Packets written to the TUN are not \
+                 answered by the kernel: clients will connect but have no internet. Check \
+                 `ip addr show {iface}` and `ip link show {iface}`, and whether this VPS \
+                 fully supports TUN networking (containers/OpenVZ often do not)."
+            );
         }
     }
     let router_task = tokio::spawn({
