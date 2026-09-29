@@ -417,6 +417,12 @@ async fn main() -> anyhow::Result<()> {
     let mut runners = Vec::new();
     let mut ips = Vec::new();
     for i in 0..args.clients {
+        if i > 0 && remote_host.is_some() {
+            // The server's per-IP connect throttle (BungeeCord-style, 1s
+            // default) resets rapid sequential connects from one source IP;
+            // real users never appear within the same second, so stagger.
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+        }
         let token = if args.mixed && i % 2 == 1 {
             token_b
         } else {
