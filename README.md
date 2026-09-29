@@ -80,6 +80,12 @@ sudo mcvpn-cli --server vpn.example.com --token <token>
 - **Byte-exact protocol**: handshake/SLP/legacy ping/login/encryption bytes are
   pinned by golden tests, including an OpenSSL-verified AES/CFB8 stream and
   Java-compatible offline UUIDs.
+- **No signature fingerprints** (verified with a live DPI capture, see
+  `docs/VERIFICATION.md`): 1024-bit RSA login key like every real 1.8.9
+  server, SLP serialized exactly like vanilla (chat-object description,
+  sample omitted when empty), per-connection random plausible usernames,
+  encrypted phase measures 8.000 bits/byte entropy, idle cadence is the
+  vanilla 20 Hz player tick.
 - **Throughput & latency**: TCP_NODELAY, OS-level keep-alive, batched
   coalesced writes (up to 128 packets per syscall), lossless backpressure —
   the ceiling is AES/CFB8 itself, the same cipher every real Minecraft server
@@ -92,6 +98,10 @@ sudo mcvpn-cli --server vpn.example.com --token <token>
   connect throttling, pending-login caps, strict AEAD counters, constant-time
   token comparison.
 - **Multi-client**: CGNAT pool (100.64.0.0/10), per-client IP, MASQUERADE NAT.
+- **Share one token with everyone**: sessions are per-connection with unique
+  tunnel IPs and random usernames — 16 concurrent same-token clients verified
+  with zero kicks; `max_clients` defaults to 256, the pool holds ~4M
+  addresses, allocation is O(log n).
 
 ## Architecture
 

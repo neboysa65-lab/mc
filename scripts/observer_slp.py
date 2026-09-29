@@ -25,25 +25,33 @@ def slp(host, port, timeout=5.0):
     hs = varint(0) + varint(47) + varint(len(hostb)) + hostb + struct.pack(">H", port) + varint(1)
     s.sendall(varint(len(hs)) + hs)
     s.sendall(varint(1) + b"\x00")
-    body = b""
-    while True:
-        chunk = s.recv(4096)
-        if not chunk:
-            break
-        body += chunk
-        if len(body) > 65536:
-            break
+    # Vanilla servers keep the connection open waiting for the ping request
+    # (up to 30s), so parse the first frame as soon as it fully arrives
+    # instead of waiting for EOF.
     def rv(buf, off):
         val = 0
         for i in range(5):
+            if off >= len(buf):
+                return None, off
             b = buf[off]
             off += 1
             val |= (b & 0x7F) << (7 * i)
             if not b & 0x80:
                 return val, off
         raise ValueError("varint too big")
-    n, off = rv(body, 0)
-    frame = body[off : off + n]
+    body = b""
+    frame = None
+    for _ in range(64):
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        body += chunk
+        n, off = rv(body, 0)
+        if n is not None and off + n <= len(body):
+            frame = body[off : off + n]
+            break
+    if frame is None:
+        raise ValueError("no status response frame")
     slen, off2 = rv(frame, 1)
     js = frame[off2 : off2 + slen]
     ping = struct.pack(">q", int(time.time() * 1000))
