@@ -14,6 +14,7 @@ pub struct DeviceHandle {
     pub(crate) cleanup: Option<Box<dyn FnOnce() + Send>>,
 }
 
+#[cfg(unix)]
 pub mod fd;
 pub mod mock;
 

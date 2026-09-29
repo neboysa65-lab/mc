@@ -100,7 +100,7 @@ pub fn open(info: &TunnelInfo) -> VpnResult<DeviceHandle> {
             if stop_reader.load(Ordering::Relaxed) {
                 break;
             }
-            match reader_session.receive() {
+            match reader_session.receive_blocking() {
                 Ok(pkt) => {
                     if inbox_tx.blocking_send(pkt.bytes().to_vec()).is_err() {
                         break;
@@ -114,6 +114,7 @@ pub fn open(info: &TunnelInfo) -> VpnResult<DeviceHandle> {
         })
         .map_err(|e| VpnError::Device(format!("thread spawn: {e}")))?;
 
+    let writer_session = Arc::clone(&session);
     std::thread::Builder::new()
         .name("wintun-wr".into())
         .spawn(move || {
@@ -121,20 +122,26 @@ pub fn open(info: &TunnelInfo) -> VpnResult<DeviceHandle> {
                 if stop_writer.load(Ordering::Relaxed) {
                     break;
                 }
-                if let Ok(mut p) = session.allocate_send_packet(pkt.len()) {
-                    p.bytes_mut().copy_from_slice(&pkt);
-                    session.send_packet(p);
+                if let Ok(size) = u16::try_from(pkt.len()) {
+                    if let Ok(mut p) = writer_session.allocate_send_packet(size) {
+                        p.bytes_mut().copy_from_slice(&pkt);
+                        writer_session.send_packet(p);
+                    }
                 }
             }
         })
         .map_err(|e| VpnError::Device(format!("thread spawn: {e}")))?;
 
     let cleanup_ip = ip;
+    let cleanup_session = Arc::clone(&session);
     Ok(DeviceHandle {
         inbox: inbox_rx,
         outbox: outbox_tx,
         name: ADAPTER_NAME.to_string(),
         stop: Some(stop),
-        cleanup: Some(Box::new(move || remove_routes(&cleanup_ip))),
+        cleanup: Some(Box::new(move || {
+            let _ = cleanup_session.shutdown();
+            remove_routes(&cleanup_ip);
+        })),
     })
 }
