@@ -92,7 +92,8 @@ fn main() -> anyhow::Result<()> {
         let mock = args.mock_device;
         let factory = move |info: &TunnelInfo| -> mcvpn::VpnResult<device::DeviceHandle> {
             if mock {
-                let (a, _b) = device::mock::mock_pair();
+                let (a, peer) = device::mock::mock_pair();
+                std::mem::forget(peer); // keep the mock peer alive
                 Ok(a)
             } else {
                 #[cfg(target_os = "linux")]

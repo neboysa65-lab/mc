@@ -123,9 +123,11 @@ impl ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientConfig {
     /// Server hostname (also used as the handshake host string, like a real client).
+    #[serde(default)]
     pub server: String,
     #[serde(default = "d_port")]
     pub port: u16,
+    #[serde(default)]
     pub token: String,
     /// Send vanilla-like 20Hz idle player updates (traffic realism).
     #[serde(default = "d_stealth_tick")]

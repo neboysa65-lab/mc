@@ -146,7 +146,8 @@ impl App {
                         stats_driver,
                         move |info: &TunnelInfo| -> mcvpn::VpnResult<device::DeviceHandle> {
                             if mock {
-                                let (a, _b) = device::mock::mock_pair();
+                                let (a, peer) = device::mock::mock_pair();
+                                std::mem::forget(peer); // keep the mock peer alive
                                 Ok(a)
                             } else {
                                 #[cfg(target_os = "windows")]
@@ -401,7 +402,8 @@ fn cli_mode(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             Arc::clone(&stats),
             move |info: &TunnelInfo| -> mcvpn::VpnResult<device::DeviceHandle> {
                 if mock {
-                    let (a, _b) = device::mock::mock_pair();
+                    let (a, peer) = device::mock::mock_pair();
+                    std::mem::forget(peer); // keep the mock peer alive
                     Ok(a)
                 } else {
                     #[cfg(target_os = "windows")]
