@@ -18,7 +18,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-/// 0 idle, 1 connecting, 2 connected, 3 error.
+/// 0 idle, 1 connecting, 2 connected, 3 error, 4 = session ended ("closed")
+/// — the app polls this to clean up when the tunnel dies.
 static STATE: AtomicU8 = AtomicU8::new(0);
 
 struct AndroidSession {
@@ -158,7 +159,11 @@ pub extern "system" fn Java_com_mcvpn_client_TunnelService_nativeStart(
     };
     let device = device::fd::from_raw_fd("mcvpn-tun", fd);
     let (tx, rx) = tokio::sync::watch::channel(false);
-    let handle = runtime().spawn(connected.attach_device(device, rx));
+    let handle = runtime().spawn(async move {
+        let result = connected.attach_device(device, rx).await;
+        STATE.store(4, Ordering::Relaxed);
+        result
+    });
     session.driver = Some((tx, handle));
     1
 }
@@ -190,6 +195,7 @@ pub extern "system" fn Java_com_mcvpn_client_TunnelService_nativeGetStats(
         0 => "idle",
         1 => "connecting",
         2 => "connected",
+        4 => "closed",
         _ => "error",
     };
     let guard = SESSION.lock().unwrap();

@@ -33,6 +33,20 @@ impl Conn {
         })
     }
 
+    /// Connect by hostname (or IP) + port; hostnames resolve through the
+    /// system resolver, like every real VPN client ("vpn.example.com").
+    pub async fn connect_host(host: &str, port: u16, timeout: Duration) -> std::io::Result<Self> {
+        let stream = tokio::time::timeout(timeout, TcpStream::connect((host, port))).await??;
+        Self::apply_socket_opts(&stream);
+        Ok(Conn {
+            stream,
+            parser: FrameParser::new(),
+            dec: None,
+            enc: None,
+            threshold: None,
+        })
+    }
+
     pub fn from_stream(stream: TcpStream) -> Self {
         Self::apply_socket_opts(&stream);
         Conn {

@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import org.json.JSONObject
 
 class TunnelService : VpnService() {
@@ -15,8 +16,11 @@ class TunnelService : VpnService() {
             System.loadLibrary("mcvpn")
         }
         @Volatile var running = false
+        @Volatile var connecting = false
         @Volatile var lastStats = "{}"
         @Volatile var lastError = ""
+        @Volatile var lastIp = ""
+        @Volatile var connectedAtMs = 0L
         const val CHANNEL_ID = "mcvpn-tunnel"
     }
 
@@ -38,10 +42,18 @@ class TunnelService : VpnService() {
         super.onDestroy()
     }
 
+    // User revoked VPN permission from system settings.
+    override fun onRevoke() {
+        stopVpn()
+    }
+
     private fun startVpn(intent: Intent) {
+        if (connecting || running) {
+            return
+        }
         ensureChannel()
         startForeground(1, notification("connecting…"))
-        running = true
+        connecting = true
         lastError = ""
 
         val server = intent.getStringExtra("server")
@@ -58,11 +70,12 @@ class TunnelService : VpnService() {
             val cfg = JSONObject(json)
             if (!cfg.optBoolean("ok", false)) {
                 lastError = cfg.optString("error", "connection failed")
-                running = false
+                connecting = false
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return@Thread
             }
+            lastIp = cfg.getString("ip")
 
             val builder = Builder()
                 .setSession("mcvpn")
@@ -92,20 +105,31 @@ class TunnelService : VpnService() {
             val fd = pfd.detachFd()
             if (!nativeStart(fd)) {
                 lastError = "tunnel start failed"
+                connecting = false
                 stopSelf()
                 return@Thread
             }
+            connecting = false
+            running = true
+            connectedAtMs = SystemClock.elapsedRealtime()
 
             Thread {
                 while (running) {
                     lastStats = nativeGetStats()
                     val stats = JSONObject(lastStats)
-                    val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-                    if (running) {
-                        val up = stats.optLong("up", 0) / 1024
-                        val down = stats.optLong("down", 0) / 1024
-                        nm.notify(1, notification("up ${up} KB · down ${down} KB"))
+                    // Tunnel ended (server closed / network died): clean up so
+                    // the UI shows the real state instead of a stale "connected".
+                    if (stats.optString("state") != "connected") {
+                        running = false
+                        connecting = false
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                        return@Thread
                     }
+                    val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                    val up = stats.optLong("up", 0) / 1024
+                    val down = stats.optLong("down", 0) / 1024
+                    nm.notify(1, notification("up ${up} KB · down ${down} KB"))
                     Thread.sleep(1000)
                 }
             }.start()
@@ -117,6 +141,9 @@ class TunnelService : VpnService() {
             nativeStop()
         }
         running = false
+        connecting = false
+        lastIp = ""
+        connectedAtMs = 0L
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -139,7 +166,7 @@ class TunnelService : VpnService() {
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("mcvpn")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setSmallIcon(R.drawable.ic_stat)
             .setContentIntent(pi)
             .setOngoing(true)
             .build()

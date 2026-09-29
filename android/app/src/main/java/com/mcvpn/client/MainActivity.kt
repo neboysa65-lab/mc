@@ -1,6 +1,10 @@
 package com.mcvpn.client
 
 import android.content.Intent
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.SystemClock
 import android.net.VpnService
 import android.os.Bundle
 import android.os.Handler
@@ -10,6 +14,7 @@ import android.widget.EditText
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
 
@@ -33,6 +38,7 @@ class MainActivity : AppCompatActivity() {
         AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        requestNotificationPermission()
 
         serverEdit = findViewById(R.id.serverEdit)
         portEdit = findViewById(R.id.portEdit)
@@ -111,21 +117,44 @@ class MainActivity : AppCompatActivity() {
         val active = TunnelService.running
         connectBtn.isEnabled = !active
         disconnectBtn.isEnabled = active
-        statsText.text = if (active) formatStats(TunnelService.lastStats) else ""
+        statsText.text = when {
+            active -> {
+                val uptime = (SystemClock.elapsedRealtime() - TunnelService.connectedAtMs) / 1000
+                "ip ${TunnelService.lastIp}   uptime ${uptime}s\n${
+                    formatStats(TunnelService.lastStats)
+                }"
+            }
+            TunnelService.connecting -> "connecting…"
+            else -> ""
+        }
         statusText.text = when {
-            active -> "● connected"
+            active -> "● connected (${TunnelService.lastIp})"
+            TunnelService.connecting -> "● connecting…"
             TunnelService.lastError.isNotEmpty() -> "● error: ${TunnelService.lastError}"
             else -> "● idle"
         }
         statusText.setTextColor(
-            resources.getColor(
+            ContextCompat.getColor(
+                this,
                 when {
                     active -> R.color.ok
+                    TunnelService.connecting -> R.color.accent
                     TunnelService.lastError.isNotEmpty() -> R.color.err
                     else -> R.color.muted
-                }, theme
+                }
             )
         )
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2
+            )
+        }
     }
 
     private fun formatStats(json: String): String {

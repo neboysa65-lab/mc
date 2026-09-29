@@ -52,15 +52,10 @@ pub async fn connect(cfg: &ClientConfig) -> VpnResult<Connected> {
 /// Same as [`connect`] but reports into a caller-provided stats holder
 /// (GUIs and drivers observe live numbers).
 pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnResult<Connected> {
-    let addr: SocketAddr = format!("{}:{}", cfg.server, cfg.port)
-        .parse()
-        .map_err(|_| {
-            VpnError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("invalid server address {}:{}", cfg.server, cfg.port),
-            ))
-        })?;
-    let mut conn = Conn::connect(addr, Duration::from_secs(10)).await?;
+    let mut conn = match format!("{}:{}", cfg.server, cfg.port).parse::<SocketAddr>() {
+        Ok(addr) => Conn::connect(addr, Duration::from_secs(10)).await?,
+        Err(_) => Conn::connect_host(&cfg.server, cfg.port, Duration::from_secs(10)).await?,
+    };
 
     // Handshake (host = the hostname we're connecting to, like a real client).
     let hs = Handshake {
@@ -72,7 +67,7 @@ pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnRe
     conn.send(&hs.encode()).await?;
     conn.send(
         &packets::LoginStart {
-            name: crate::derive_username(&cfg.token),
+            name: crate::random_username(),
         }
         .encode(),
     )

@@ -64,6 +64,9 @@ pub struct ServerShared {
     pub pending: AtomicU32,
     pub active_sessions: AtomicU32,
     pub per_ip: Mutex<HashMap<IpAddr, Instant>>,
+    /// Live connection tasks (aborted together on shutdown so peers see a
+    /// real disconnect instead of a half-open session).
+    pub conn_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 pub async fn run(
@@ -118,6 +121,7 @@ pub async fn run(
         pending: AtomicU32::new(0),
         active_sessions: AtomicU32::new(0),
         per_ip: Mutex::new(HashMap::new()),
+        conn_tasks: Mutex::new(Vec::new()),
     });
 
     let bind_addr: SocketAddr = format!("{}:{}", shared.cfg.bind, shared.cfg.port).parse()?;
@@ -168,14 +172,24 @@ pub async fn run(
                     drop(stream);
                     continue;
                 }
-                let shared = Arc::clone(&shared);
-                tokio::spawn(async move {
-                    if let Err(e) = handle_conn(stream, shared).await {
+                let conn_shared = Arc::clone(&shared);
+                let task = tokio::spawn(async move {
+                    if let Err(e) = handle_conn(stream, conn_shared).await {
                         tracing::debug!("connection ended: {e}");
                     }
                 });
+                {
+                    let mut tasks = shared.conn_tasks.lock().unwrap();
+                    tasks.retain(|t| !t.is_finished());
+                    tasks.push(task);
+                }
             }
         }
+    }
+    // Shutdown must reach live sessions too: the accept loop dying alone
+    // would leave half-open connections that clients never notice.
+    for t in shared.conn_tasks.lock().unwrap().drain(..) {
+        t.abort();
     }
     write_pump.abort();
     router_task.abort();
@@ -188,6 +202,11 @@ fn throttle_ok(shared: &ServerShared, ip: IpAddr) -> bool {
         return true;
     }
     let mut map = shared.per_ip.lock().unwrap();
+    // Bound the map so a flood of source IPs cannot grow it forever.
+    if map.len() > 16_384 {
+        let window = min * 8;
+        map.retain(|_, t| t.elapsed() < window);
+    }
     match map.get(&ip) {
         Some(t) if t.elapsed() < min => false,
         _ => {

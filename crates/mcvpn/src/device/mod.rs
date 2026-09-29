@@ -38,6 +38,11 @@ impl DeviceHandle {
             s.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
+
+    /// Register platform cleanup (e.g. Linux route removal) run on drop.
+    pub fn set_cleanup(&mut self, f: Box<dyn FnOnce() + Send>) {
+        self.cleanup = Some(f);
+    }
 }
 
 impl Drop for DeviceHandle {

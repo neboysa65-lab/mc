@@ -34,7 +34,10 @@ pub struct ServerConfig {
     /// Play-state keep-alive interval (vanilla 1.8 sends every 15s).
     #[serde(default = "d_keepalive")]
     pub keepalive_secs: u64,
-    /// RSA login key size in bits (BungeeCord uses 1024; 2048 recommended).
+    /// RSA login key size in bits. 1024 matches vanilla/BungeeCord exactly —
+    /// a 2048-bit key makes the Encryption Request ~130 bytes longer than
+    /// every real 1.8.9 server's, which is itself a fingerprint. Session
+    /// security does not rest on it (inner AES-256-GCM + token auth do).
     #[serde(default = "d_rsa_bits")]
     pub rsa_bits: usize,
     /// CGNAT range the tunnel assigns client IPs from.
@@ -79,7 +82,7 @@ fn d_keepalive() -> u64 {
     15
 }
 fn d_rsa_bits() -> usize {
-    2048
+    1024
 }
 fn d_tunnel_cidr() -> String {
     "100.64.0.0/10".into()
@@ -88,7 +91,7 @@ fn d_mtu() -> u16 {
     1400
 }
 fn d_max_clients() -> u32 {
-    16
+    256
 }
 fn d_max_pending() -> u32 {
     64

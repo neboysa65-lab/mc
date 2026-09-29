@@ -59,8 +59,14 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload
-systemctl enable --now mcvpn
+if [ "$(ps -p 1 -o comm= 2>/dev/null)" = "systemd" ] && command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload
+  systemctl enable --now mcvpn
+else
+  echo "    systemd not detected (container?) — starting under nohup instead"
+  nohup "$BIN_DIR/mcvpn-server" --config "$CONF" >/var/log/mcvpn.log 2>&1 &
+  echo "    pid: $! (log: /var/log/mcvpn.log)"
+fi
 
 echo "==> firewall note"
 echo "    make sure TCP 25565 is open on your provider firewall"

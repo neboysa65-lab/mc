@@ -20,6 +20,9 @@ struct Args {
     /// In-memory device (loopback smoke test)
     #[arg(long)]
     mock_device: bool,
+    /// Routing mode: full (default) | none | comma-separated CIDRs
+    #[arg(long, default_value = "full")]
+    routes: String,
     /// TOML config file path
     #[arg(long)]
     config: Option<std::path::PathBuf>,
@@ -90,6 +93,10 @@ fn main() -> anyhow::Result<()> {
         });
 
         let mock = args.mock_device;
+        #[cfg(target_os = "linux")]
+        let route_mode = parse_routes(&args.routes);
+        #[cfg(target_os = "linux")]
+        let protect_ip = resolve_server_ip(&cfg.server, cfg.port);
         let factory = move |info: &TunnelInfo| -> mcvpn::VpnResult<device::DeviceHandle> {
             if mock {
                 let (a, peer) = device::mock::mock_pair();
@@ -101,11 +108,16 @@ fn main() -> anyhow::Result<()> {
                     let ip = std::net::Ipv4Addr::from(info.ip);
                     let mask = std::net::Ipv4Addr::from(info.netmask);
                     let prefix = u32::from(mask).count_ones() as u8;
-                    Ok(device::tun::open(
-                        "mcvpnc0",
-                        &format!("{ip}/{prefix}"),
-                        info.mtu,
-                    )?)
+                    let mut handle =
+                        device::tun::open("mcvpnc0", &format!("{ip}/{prefix}"), info.mtu)?;
+                    let added = device::tun::add_client_routes("mcvpnc0", protect_ip, &route_mode)?;
+                    if !added.is_empty() {
+                        let tun = "mcvpnc0".to_string();
+                        handle.set_cleanup(Box::new(move || {
+                            device::tun::del_client_routes(&tun, &added);
+                        }));
+                    }
+                    Ok(handle)
                 }
                 #[cfg(not(target_os = "linux"))]
                 Err(mcvpn::VpnError::Device(
@@ -137,4 +149,25 @@ fn main() -> anyhow::Result<()> {
         stats_printer.abort();
     });
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn parse_routes(spec: &str) -> device::tun::RouteMode {
+    match spec.trim() {
+        "full" => device::tun::RouteMode::Full,
+        "none" => device::tun::RouteMode::None,
+        other => device::tun::RouteMode::Targeted(
+            other
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+        ),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_server_ip(host: &str, port: u16) -> Option<std::net::IpAddr> {
+    use std::net::ToSocketAddrs;
+    (host, port).to_socket_addrs().ok()?.next().map(|a| a.ip())
 }

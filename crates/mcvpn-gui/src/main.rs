@@ -42,6 +42,7 @@ enum UiState {
 struct Driver {
     shutdown: tokio::sync::watch::Sender<bool>,
     stats: SharedStats,
+    info: Arc<Mutex<Option<(TunnelInfo, Instant)>>>,
 }
 
 struct App {
@@ -54,6 +55,7 @@ struct App {
     up_rate: f64,
     down_rate: f64,
     rtt_ms: Option<u32>,
+    totals: (u64, u64),
     last_poll: Instant,
     config_path: PathBuf,
     status_msg: String,
@@ -82,6 +84,7 @@ impl App {
             up_rate: 0.0,
             down_rate: 0.0,
             rtt_ms: None,
+            totals: (0, 0),
             last_poll: Instant::now(),
             config_path: path.clone(),
             status_msg: String::new(),
@@ -130,8 +133,32 @@ impl App {
         let state = Arc::clone(&self.state);
         let stats: SharedStats = Arc::new(mcvpn::stats::Stats::default());
         let stats_driver = Arc::clone(&stats);
+        let shared_info: Arc<Mutex<Option<(TunnelInfo, Instant)>>> = Arc::new(Mutex::new(None));
+        let factory_info = Arc::clone(&shared_info);
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let mock = std::env::var("MCVPN_MOCK_DEVICE").is_ok();
+        #[cfg(target_os = "linux")]
+        let protect_ip: Option<std::net::IpAddr> = {
+            use std::net::ToSocketAddrs;
+            cfg.server
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut a| a.next().map(|x| x.ip()))
+        };
+        #[cfg(not(target_os = "linux"))]
+        let protect_ip: Option<std::net::IpAddr> = None;
+        #[cfg(target_os = "linux")]
+        let route_mode = match std::env::var("MCVPN_ROUTES").as_deref() {
+            Ok("none") => device::tun::RouteMode::None,
+            Ok(other) => device::tun::RouteMode::Targeted(
+                other
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            ),
+            Err(_) => device::tun::RouteMode::Full,
+        };
 
         let thread = std::thread::Builder::new()
             .name("mcvpn-driver".into())
@@ -152,17 +179,35 @@ impl App {
                             } else {
                                 #[cfg(target_os = "windows")]
                                 return device::wintun::open(info);
-                                #[cfg(not(target_os = "windows"))]
+                                #[cfg(target_os = "linux")]
                                 {
                                     let ip = std::net::Ipv4Addr::from(info.ip);
                                     let mask = std::net::Ipv4Addr::from(info.netmask);
                                     let prefix = u32::from(mask).count_ones() as u8;
-                                    device::tun::open(
+                                    let mut handle = device::tun::open(
                                         "mcvpnc0",
                                         &format!("{ip}/{prefix}"),
                                         info.mtu,
-                                    )
+                                    )?;
+                                    let added = device::tun::add_client_routes(
+                                        "mcvpnc0",
+                                        protect_ip,
+                                        &route_mode,
+                                    )?;
+                                    if !added.is_empty() {
+                                        let tun = "mcvpnc0".to_string();
+                                        handle.set_cleanup(Box::new(move || {
+                                            device::tun::del_client_routes(&tun, &added);
+                                        }));
+                                    }
+                                    *factory_info.lock().unwrap() =
+                                        Some((info.clone(), Instant::now()));
+                                    Ok(handle)
                                 }
+                                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                                Err(mcvpn::VpnError::Device(
+                                    "no device backend for this OS".into(),
+                                ))
                             }
                         },
                         shutdown_rx,
@@ -186,6 +231,7 @@ impl App {
         self.driver = Some(Driver {
             shutdown: shutdown_tx,
             stats,
+            info: shared_info,
         });
     }
 
@@ -207,6 +253,7 @@ impl App {
             } else {
                 Some(snap.rtt_ms)
             };
+            self.totals = (snap.up_bytes, snap.down_bytes);
             self.last_stats = (snap.up_bytes, snap.down_bytes);
             self.last_poll = Instant::now();
         }
@@ -265,13 +312,33 @@ impl eframe::App for App {
                             self.disconnect();
                         }
                         ui.add_space(8.0);
+                        let (ip, uptime) = self
+                            .driver
+                            .as_ref()
+                            .and_then(|d| d.info.lock().unwrap().clone())
+                            .map(|(info, since)| {
+                                (
+                                    format!(
+                                        "{}.{}.{}.{}",
+                                        info.ip[0], info.ip[1], info.ip[2], info.ip[3]
+                                    ),
+                                    since.elapsed(),
+                                )
+                            })
+                            .unwrap_or_else(|| ("-".into(), Duration::ZERO));
                         ui.monospace(format!(
-                            "up {:.0} KB/s   down {:.0} KB/s   rtt {} ms",
+                            "ip {ip}   up {:.2} MB   down {:.2} MB",
+                            self.totals.0 as f64 / 1048576.0,
+                            self.totals.1 as f64 / 1048576.0,
+                        ));
+                        ui.monospace(format!(
+                            "up {:.0} KB/s   down {:.0} KB/s   rtt {} ms   uptime {}",
                             self.up_rate / 1024.0,
                             self.down_rate / 1024.0,
                             self.rtt_ms
                                 .map(|r| r.to_string())
-                                .unwrap_or_else(|| "-".into())
+                                .unwrap_or_else(|| "-".into()),
+                            fmt_duration(uptime),
                         ));
                     }
                     UiState::Connecting => {
@@ -343,6 +410,17 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native("mcvpn", options, Box::new(|_cc| Ok(Box::new(App::new()))))
+}
+
+fn fmt_duration(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m {}s", s / 60, s % 60)
+    } else {
+        format!("{}h {}m", s / 3600, (s % 3600) / 60)
+    }
 }
 
 fn cli_mode(args: Args) -> Result<(), Box<dyn std::error::Error>> {

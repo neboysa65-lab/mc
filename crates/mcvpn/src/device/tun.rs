@@ -86,6 +86,102 @@ fn run(cmd: &[&str]) -> VpnResult<()> {
     Ok(())
 }
 
+fn default_route() -> Option<(Option<String>, String)> {
+    let out = std::process::Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+        .ok()?;
+    let line = String::from_utf8_lossy(&out.stdout);
+    let line = line.lines().next()?.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let mut via = None;
+    let mut dev = None;
+    let mut parts = line.split_whitespace();
+    while let Some(p) = parts.next() {
+        match p {
+            "via" => via = parts.next().map(|s| s.to_string()),
+            "dev" => dev = parts.next().map(|s| s.to_string()),
+            _ => {}
+        }
+    }
+    dev.map(|d| (via, d))
+}
+
+fn route_op(op: &str, spec: &str, tun: Option<&str>) -> VpnResult<()> {
+    let mut cmd = vec!["ip", "route", op, spec];
+    if let Some(t) = tun {
+        cmd.push("dev");
+        cmd.push(t);
+    }
+    run(&cmd)
+}
+
+/// Route mode for the client tunnel.
+pub enum RouteMode {
+    /// Full tunnel: split default (0/1 + 128/1) through the TUN, with a
+    /// protected host route to the VPN server so reconnects never loop.
+    Full,
+    /// Only route the listed CIDRs through the tunnel.
+    Targeted(Vec<String>),
+    /// No routes at all (tests, diagnostics).
+    None,
+}
+
+/// Install client routes; returns the specs added (for [`del_client_routes`]).
+/// Also disables rp_filter on the TUN so replies from the tunnel are not
+/// dropped by strict reverse-path filtering (the classic TUN client trap).
+pub fn add_client_routes(
+    tun: &str,
+    protect_ip: Option<std::net::IpAddr>,
+    mode: &RouteMode,
+) -> VpnResult<Vec<String>> {
+    let mut added: Vec<String> = Vec::new();
+    let _ = run(&["sysctl", "-w", &format!("net.ipv4.conf.{tun}.rp_filter=0")]);
+    match mode {
+        RouteMode::None => {}
+        RouteMode::Full => {
+            if let Some(std::net::IpAddr::V4(ip)) = protect_ip {
+                if !ip.is_loopback() {
+                    let (via, dev) = default_route()
+                        .ok_or_else(|| VpnError::Device("no default route found".into()))?;
+                    let spec = format!("{ip}/32");
+                    let mut cmd = vec!["ip", "route", "add", &spec];
+                    if let Some(v) = &via {
+                        cmd.push("via");
+                        cmd.push(v);
+                    }
+                    cmd.push("dev");
+                    cmd.push(&dev);
+                    // Never start tunneling without the escape route: if this
+                    // fails, refuse instead of risking a routing loop.
+                    run(&cmd)?;
+                    added.push(spec);
+                }
+            }
+            for cidr in ["0.0.0.0/1", "128.0.0.0/1"] {
+                route_op("add", cidr, Some(tun))?;
+                added.push(cidr.to_string());
+            }
+        }
+        RouteMode::Targeted(cidrs) => {
+            for cidr in cidrs {
+                route_op("add", cidr, Some(tun))?;
+                added.push(cidr.clone());
+            }
+        }
+    }
+    Ok(added)
+}
+
+/// Remove routes previously added by [`add_client_routes`].
+pub fn del_client_routes(tun: &str, added: &[String]) {
+    for spec in added {
+        let _ = route_op("del", spec, Some(tun));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

@@ -1,12 +1,14 @@
 use crate::error::{VpnError, VpnResult};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::net::Ipv4Addr;
 
-/// Simple sequential allocator over a CIDR (default 100.64.0.0/10).
+/// Allocator over a CIDR (default 100.64.0.0/10): O(log n) with a free list,
+/// lowest-first reuse so addresses look like a normally filling server.
 pub struct IpPool {
     base: u32,
     prefix: u8,
     used: HashSet<u32>,
+    free: BTreeSet<u32>,
     next: u32,
 }
 
@@ -34,6 +36,7 @@ impl IpPool {
             base,
             prefix,
             used: HashSet::new(),
+            free: BTreeSet::new(),
             next: base + 2,
         })
     }
@@ -66,17 +69,22 @@ impl IpPool {
 
     pub fn allocate(&mut self) -> Option<Ipv4Addr> {
         // Lowest-first allocation: deterministic and reuses released IPs.
+        if let Some(&ip) = self.free.iter().next() {
+            self.free.remove(&ip);
+            self.used.insert(ip);
+            return Some(Ipv4Addr::from(ip));
+        }
         let first = self.base + 2;
         let last = self.broadcast() - 1;
         if last < first {
             return None;
         }
-        for candidate in first..=last {
-            if self.used.insert(candidate) {
-                self.next = candidate + 1;
-                return Some(Ipv4Addr::from(candidate));
-            }
+        if self.next <= last && self.used.insert(self.next) {
+            let ip = self.next;
+            self.next += 1;
+            return Some(Ipv4Addr::from(ip));
         }
+        // Fully handed out and nothing freed yet.
         None
     }
 
@@ -91,7 +99,10 @@ impl IpPool {
     }
 
     pub fn release(&mut self, ip: Ipv4Addr) {
-        self.used.remove(&u32::from(ip));
+        let raw = u32::from(ip);
+        if self.used.remove(&raw) {
+            self.free.insert(raw);
+        }
     }
 
     pub fn in_use(&self) -> usize {
