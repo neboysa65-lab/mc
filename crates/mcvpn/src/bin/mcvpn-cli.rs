@@ -52,10 +52,7 @@ fn main() -> anyhow::Result<()> {
         .server
         .or(file.server)
         .ok_or_else(|| anyhow::anyhow!("--server or config file required"))?;
-    let token = args
-        .token
-        .or(file.token)
-        .ok_or_else(|| anyhow::anyhow!("--token or config file required"))?;
+    let token = args.token.or(file.token).unwrap_or_default();
     let port = file.port.unwrap_or(args.port);
 
     let cfg = mcvpn::config::ClientConfig {
@@ -95,9 +92,9 @@ fn main() -> anyhow::Result<()> {
         let mock = args.mock_device;
         #[cfg(target_os = "linux")]
         let route_mode = parse_routes(&args.routes);
-        #[cfg(target_os = "linux")]
-        let protect_ip = resolve_server_ip(&cfg.server, cfg.port);
-        let factory = move |info: &TunnelInfo| -> mcvpn::VpnResult<device::DeviceHandle> {
+        let factory = move |info: &TunnelInfo,
+                            server_ip: Option<std::net::IpAddr>|
+              -> mcvpn::VpnResult<device::DeviceHandle> {
             if mock {
                 let (a, peer) = device::mock::mock_pair();
                 std::mem::forget(peer); // keep the mock peer alive
@@ -110,7 +107,7 @@ fn main() -> anyhow::Result<()> {
                     let prefix = u32::from(mask).count_ones() as u8;
                     let mut handle =
                         device::tun::open("mcvpnc0", &format!("{ip}/{prefix}"), info.mtu)?;
-                    let added = device::tun::add_client_routes("mcvpnc0", protect_ip, &route_mode)?;
+                    let added = device::tun::add_client_routes("mcvpnc0", server_ip, &route_mode)?;
                     if !added.is_empty() {
                         let tun = "mcvpnc0".to_string();
                         handle.set_cleanup(Box::new(move || {
@@ -129,7 +126,7 @@ fn main() -> anyhow::Result<()> {
         let handle = tokio::spawn(client::run_client(
             cfg,
             stats,
-            move |info| factory(info),
+            move |info, server_ip| factory(info, server_ip),
             shutdown_rx,
             move |state| match state {
                 ClientState::Connecting => println!("[state] connecting..."),
@@ -164,10 +161,4 @@ fn parse_routes(spec: &str) -> device::tun::RouteMode {
                 .collect(),
         ),
     }
-}
-
-#[cfg(target_os = "linux")]
-fn resolve_server_ip(host: &str, port: u16) -> Option<std::net::IpAddr> {
-    use std::net::ToSocketAddrs;
-    (host, port).to_socket_addrs().ok()?.next().map(|a| a.ip())
 }

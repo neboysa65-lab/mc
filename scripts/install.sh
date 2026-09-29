@@ -135,8 +135,11 @@ IP="$(curl --max-time 5 -fsSL -4 https://api.ipify.org 2>/dev/null || hostname -
 echo
 echo "=============================================================="
 echo " mcvpn is running. Connect clients with:"
-echo "   server: $IP   port: 25565"
+echo "   server: $IP   port: $PORT"
 echo "   token:  $TOKEN"
+echo
+echo " Or paste this ONE line into the app's Server field (fills everything):"
+echo "   mcvpn://$TOKEN@$IP:$PORT"
 echo " config: $CONF"
 echo " logs:   journalctl -u mcvpn -f"
 echo "=============================================================="

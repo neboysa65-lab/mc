@@ -625,7 +625,7 @@ async fn main() -> anyhow::Result<()> {
         let runner = tokio::spawn(client::run_client(
             cfg,
             Arc::new(Stats::default()),
-            move |_info| {
+            move |_info, _server_ip| {
                 let (a, peer) = mock_pair();
                 std::mem::forget(peer);
                 Ok(a)

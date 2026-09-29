@@ -327,3 +327,73 @@ async fn throughput_smoke() {
         stats.snapshot().up_bytes
     );
 }
+
+/// The GUI's "traffic is really routed into the tunnel" check: a packet the OS
+/// hands to the tunnel device with the probe destination must flip
+/// `probe_seen`; ordinary traffic must not.
+#[tokio::test]
+async fn route_probe_is_detected_at_the_tunnel_device() {
+    let port = free_port().await;
+    let _internet = spawn_server(test_server_cfg(port)).await;
+    let stats: mcvpn::stats::SharedStats = std::sync::Arc::new(mcvpn::stats::Stats::default());
+    let sess = client::connect_with_stats(&client_cfg(port, "test-token-123"), stats.clone())
+        .await
+        .expect("connect");
+    let info = sess.info().clone();
+    let (client_dev, client_os_side) = mock_pair();
+    let (tx, rx) = watch::channel(false);
+    std::mem::forget(tx);
+    tokio::spawn(async move { sess.attach_device(client_dev, rx).await });
+
+    client_os_side
+        .outbox
+        .send(fake_ip(info.ip, [8, 8, 8, 8], b"ordinary traffic"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !stats.snapshot().probe_seen,
+        "ordinary traffic is not the probe"
+    );
+
+    client_os_side
+        .outbox
+        .send(fake_ip(info.ip, client::PROBE_ADDR, b"mcvpn-route-probe"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        stats.snapshot().probe_seen,
+        "probe must be seen at the device"
+    );
+}
+
+/// Users paste sloppy input; the client must still connect: trailing
+/// whitespace/zero-width chars in the token, "ip:port" in the server field,
+/// and a full mcvpn:// share link with no separate token.
+#[tokio::test]
+async fn sloppy_user_input_still_connects() {
+    let port = free_port().await;
+    let _internet = spawn_server(test_server_cfg(port)).await;
+
+    let mut c = client_cfg(port, " test-token-123\u{200B}\n");
+    c.server = format!(" 127.0.0.1:{port} ");
+    assert!(
+        client::connect(&c).await.is_ok(),
+        "token/host junk must be tolerated"
+    );
+
+    let mut link = client_cfg(1, "");
+    link.server = format!("mcvpn://test-token-123@127.0.0.1:{port}");
+    assert!(
+        client::connect(&link).await.is_ok(),
+        "share link must connect"
+    );
+
+    let empty = client_cfg(port, "  ");
+    match client::connect(&empty).await {
+        Err(mcvpn::VpnError::Kick(m)) => assert!(m.contains("token"), "{m}"),
+        Err(e) => panic!("empty token must give a clear error, got {e:?}"),
+        Ok(_) => panic!("empty token must not connect"),
+    }
+}

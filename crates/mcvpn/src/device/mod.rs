@@ -21,6 +21,8 @@ pub mod mock;
 #[cfg(target_os = "linux")]
 pub mod tun;
 
+pub mod winroute;
+
 #[cfg(target_os = "windows")]
 pub mod wintun;
 

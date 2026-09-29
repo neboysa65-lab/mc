@@ -12,14 +12,24 @@ import org.json.JSONObject
 
 class TunnelService : VpnService() {
     companion object {
+        // Declared before init: a missing/incompatible native library must
+        // become a readable error in the UI, not a crash on first touch.
+        @Volatile var libError: String? = null
+
         init {
-            System.loadLibrary("mcvpn")
+            try {
+                System.loadLibrary("mcvpn")
+            } catch (t: Throwable) {
+                libError = "native library failed to load: ${t.message}"
+            }
         }
+
         @Volatile var running = false
         @Volatile var connecting = false
         @Volatile var lastStats = "{}"
         @Volatile var lastError = ""
         @Volatile var lastIp = ""
+        @Volatile var lastLog = ""
         @Volatile var connectedAtMs = 0L
         const val CHANNEL_ID = "mcvpn-tunnel"
     }
@@ -28,11 +38,16 @@ class TunnelService : VpnService() {
     private external fun nativeStart(fd: Int): Boolean
     private external fun nativeStop()
     private external fun nativeGetStats(): String
+    private external fun nativeGetLog(): String
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.getStringExtra("action")) {
-            "connect" -> startVpn(intent)
-            else -> stopVpn()
+        try {
+            when (intent?.getStringExtra("action")) {
+                "connect" -> startVpn(intent)
+                else -> stopVpn()
+            }
+        } catch (t: Throwable) {
+            fail("${t.javaClass.simpleName}: ${t.message}")
         }
         return START_NOT_STICKY
     }
@@ -47,8 +62,38 @@ class TunnelService : VpnService() {
         stopVpn()
     }
 
+    private fun refreshLog() {
+        lastLog = try {
+            nativeGetLog()
+        } catch (t: Throwable) {
+            "log unavailable: ${t.message}"
+        }
+    }
+
+    /** Terminal failure: record why, release EVERYTHING (native session included). */
+    private fun fail(message: String) {
+        lastError = message
+        running = false
+        connecting = false
+        lastIp = ""
+        try {
+            nativeStop()
+        } catch (_: Throwable) {
+        }
+        refreshLog()
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } catch (_: Throwable) {
+        }
+        stopSelf()
+    }
+
     private fun startVpn(intent: Intent) {
         if (connecting || running) {
+            return
+        }
+        libError?.let {
+            fail(it)
             return
         }
         ensureChannel()
@@ -56,95 +101,105 @@ class TunnelService : VpnService() {
         connecting = true
         lastError = ""
 
-        val server = intent.getStringExtra("server")
+        val server = intent.getStringExtra("server")?.trim()
         val port = intent.getIntExtra("port", 25565)
-        val token = intent.getStringExtra("token")
+        val token = intent.getStringExtra("token")?.trim()
         if (server.isNullOrEmpty() || token.isNullOrEmpty()) {
-            lastError = "missing server/token"
-            stopSelf()
+            fail("missing server/token")
             return
         }
 
         Thread {
-            val json = nativeConnect(server, port, token)
-            val cfg = JSONObject(json)
-            if (!cfg.optBoolean("ok", false)) {
-                lastError = cfg.optString("error", "connection failed")
-                connecting = false
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-                return@Thread
-            }
-            lastIp = cfg.getString("ip")
-
-            val builder = Builder()
-                .setSession("mcvpn")
-                .setMtu(cfg.getInt("mtu"))
-                .addAddress(cfg.getString("ip"), cfg.getInt("prefix_len"))
-                .addRoute("0.0.0.0", 0)
-
-            val dns = cfg.optJSONArray("dns")
-            if (dns != null) {
-                for (i in 0 until dns.length()) {
-                    builder.addDnsServer(dns.getString(i))
-                }
-            }
-            // Keep this app's own traffic on the physical network: the
-            // tunnel socket was established before the VPN came up, and
-            // this also makes manual reconnects safe.
             try {
-                builder.addDisallowedApplication("com.mcvpn.client")
-            } catch (_: Exception) {
+                connectAndRun(server, port, token)
+            } catch (t: Throwable) {
+                // Any exception in this thread used to crash the whole app.
+                fail("${t.javaClass.simpleName}: ${t.message}")
             }
-
-            val pfd: ParcelFileDescriptor = builder.establish() ?: run {
-                lastError = "VPN permission revoked"
-                stopSelf()
-                return@Thread
-            }
-            val fd = pfd.detachFd()
-            if (!nativeStart(fd)) {
-                lastError = "tunnel start failed"
-                connecting = false
-                stopSelf()
-                return@Thread
-            }
-            connecting = false
-            running = true
-            connectedAtMs = SystemClock.elapsedRealtime()
-
-            Thread {
-                while (running) {
-                    lastStats = nativeGetStats()
-                    val stats = JSONObject(lastStats)
-                    // Tunnel ended (server closed / network died): clean up so
-                    // the UI shows the real state instead of a stale "connected".
-                    if (stats.optString("state") != "connected") {
-                        running = false
-                        connecting = false
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                        stopSelf()
-                        return@Thread
-                    }
-                    val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-                    val up = stats.optLong("up", 0) / 1024
-                    val down = stats.optLong("down", 0) / 1024
-                    nm.notify(1, notification("up ${up} KB · down ${down} KB"))
-                    Thread.sleep(1000)
-                }
-            }.start()
         }.start()
     }
 
+    private fun connectAndRun(server: String, port: Int, token: String) {
+        val cfg = JSONObject(nativeConnect(server, port, token))
+        if (!cfg.optBoolean("ok", false)) {
+            fail(cfg.optString("error", "connection failed"))
+            return
+        }
+        lastIp = cfg.getString("ip")
+
+        val builder = Builder()
+            .setSession("mcvpn")
+            .setMtu(cfg.getInt("mtu"))
+            .addAddress(cfg.getString("ip"), cfg.getInt("prefix_len"))
+            .addRoute("0.0.0.0", 0)
+
+        val dns = cfg.optJSONArray("dns")
+        if (dns != null) {
+            for (i in 0 until dns.length()) {
+                builder.addDnsServer(dns.getString(i))
+            }
+        }
+        // Keep this app's own traffic (the tunnel's TCP socket) on the
+        // physical network: no routing loop, safe reconnects.
+        try {
+            builder.addDisallowedApplication(packageName)
+        } catch (_: Exception) {
+        }
+
+        val pfd: ParcelFileDescriptor? = builder.establish()
+        if (pfd == null) {
+            // Also releases `connecting` (it used to stay true forever, which
+            // made the Connect button unusable until the app was force-stopped).
+            fail("VPN permission missing or revoked (establish() returned null)")
+            return
+        }
+        val fd = pfd.detachFd()
+        if (!nativeStart(fd)) {
+            fail("tunnel start failed")
+            return
+        }
+        connecting = false
+        running = true
+        connectedAtMs = SystemClock.elapsedRealtime()
+        refreshLog()
+
+        var tick = 0
+        while (running) {
+            val stats = JSONObject(nativeGetStats())
+            lastStats = stats.toString()
+            // Tunnel ended (server closed / network died): say WHY instead of a
+            // silent flip back to "idle".
+            if (stats.optString("state") != "connected") {
+                val why = stats.optString("error", "")
+                fail(if (why.isEmpty()) "connection closed" else "connection lost: $why")
+                return
+            }
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            val up = stats.optLong("up", 0) / 1024
+            val down = stats.optLong("down", 0) / 1024
+            nm.notify(1, notification("up ${up} KB · down ${down} KB"))
+            if (tick++ % 3 == 0) {
+                refreshLog()
+            }
+            Thread.sleep(1000)
+        }
+    }
+
     private fun stopVpn() {
-        if (running) {
+        // Unconditional: nativeStop is idempotent, and a half-established
+        // session (connected, VPN not yet up) must be closed too.
+        try {
             nativeStop()
+        } catch (_: Throwable) {
         }
         running = false
         connecting = false
         lastIp = ""
         connectedAtMs = 0L
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } catch (_: Throwable) {
+        }
         stopSelf()
     }
 

@@ -92,8 +92,33 @@ pub fn from_raw_fd(name: &str, fd: RawFd) -> DeviceHandle {
                 if stop_writer.load(Ordering::Relaxed) {
                     break;
                 }
-                if write_file.write_all(&pkt).is_err() {
-                    break;
+                // dup()'d descriptors SHARE the open file description, so the
+                // O_NONBLOCK we set for the reader applies to this writer too:
+                // a full TUN queue yields EAGAIN. That used to end the writer
+                // thread for good (downstream silently dead). Wait for
+                // POLLOUT and retry instead; only real errors stop it.
+                let mut off = 0;
+                while off < pkt.len() {
+                    match write_file.write(&pkt[off..]) {
+                        Ok(0) => break,
+                        Ok(n) => off += n,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            let mut pfd = libc::pollfd {
+                                fd: write_fd,
+                                events: libc::POLLOUT,
+                                revents: 0,
+                            };
+                            unsafe { libc::poll(&mut pfd, 1, 100) };
+                            if stop_writer.load(Ordering::Relaxed) {
+                                return;
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "device writer stopped");
+                            return;
+                        }
+                    }
                 }
             }
         })

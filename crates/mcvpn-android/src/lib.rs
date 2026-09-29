@@ -32,12 +32,14 @@ struct AndroidSession {
 }
 
 static SESSION: Mutex<Option<AndroidSession>> = Mutex::new(None);
+/// Why the last session ended (shown by the app instead of a bare "closed").
+static LAST_ERROR: Mutex<String> = Mutex::new(String::new());
 
 fn runtime() -> &'static tokio::runtime::Runtime {
     RUNTIME.get_or_init(|| {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::new("mcvpn=info"))
-            .try_init();
+        // Ring-buffer log: the app has no console, so this is how a failed
+        // connection becomes diagnosable (nativeGetLog -> "Copy log").
+        mcvpn::logbuf::init(None);
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -76,6 +78,8 @@ pub extern "system" fn Java_com_mcvpn_client_TunnelService_nativeConnect(
     };
 
     STATE.store(1, Ordering::Relaxed);
+    LAST_ERROR.lock().unwrap().clear();
+    tracing::info!("nativeConnect called");
     let cfg = ClientConfig {
         server,
         port: port.max(0) as u16,
@@ -161,6 +165,10 @@ pub extern "system" fn Java_com_mcvpn_client_TunnelService_nativeStart(
     let (tx, rx) = tokio::sync::watch::channel(false);
     let handle = runtime().spawn(async move {
         let result = connected.attach_device(device, rx).await;
+        if let Err(e) = &result {
+            tracing::warn!(error = %e, "session ended");
+            *LAST_ERROR.lock().unwrap() = e.to_string();
+        }
         STATE.store(4, Ordering::Relaxed);
         result
     });
@@ -212,7 +220,17 @@ pub extern "system" fn Java_com_mcvpn_client_TunnelService_nativeGetStats(
         "up": up,
         "down": down,
         "rtt": rtt,
+        "error": LAST_ERROR.lock().unwrap().clone(),
     })
     .to_string();
     jstr(&mut env, &json)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_mcvpn_client_TunnelService_nativeGetLog(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let log = mcvpn::logbuf::snapshot();
+    jstr(&mut env, &log)
 }

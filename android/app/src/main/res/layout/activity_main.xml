@@ -93,6 +93,14 @@
             android:enabled="false"
             android:text="DISCONNECT" />
 
+        <Button
+            android:id="@+id/logBtn"
+            style="?android:attr/buttonBarButtonStyle"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="8dp"
+            android:text="LOG / COPY" />
+
         <Space
             android:layout_width="match_parent"
             android:layout_height="20dp" />
@@ -101,6 +109,7 @@
             android:id="@+id/statusText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:textIsSelectable="true"
             android:text="● idle"
             android:textColor="@color/muted" />
 

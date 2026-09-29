@@ -32,7 +32,14 @@ impl VpnError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            VpnError::Io(_) | VpnError::Timeout | VpnError::Shutdown
+            // Middleboxes and resets can corrupt a stream mid-flight (Mc /
+            // Crypto errors): a fresh attempt is the right response. Kicks
+            // (bad token, server full) and device errors need the user.
+            VpnError::Io(_)
+                | VpnError::Timeout
+                | VpnError::Shutdown
+                | VpnError::Mc(_)
+                | VpnError::Crypto(_)
         )
     }
 }

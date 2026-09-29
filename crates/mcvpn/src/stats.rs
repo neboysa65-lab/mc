@@ -9,6 +9,9 @@ pub struct Stats {
     pub down_packets: AtomicU64,
     /// Last measured round-trip in ms (0 = unknown).
     pub rtt_ms: AtomicU32,
+    /// Set when the OS actually routed our route-probe datagram into the
+    /// tunnel device (proves the routing table sends traffic into the VPN).
+    pub probe_seen: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -18,6 +21,7 @@ pub struct StatsSnapshot {
     pub up_packets: u64,
     pub down_packets: u64,
     pub rtt_ms: u32,
+    pub probe_seen: bool,
 }
 
 impl Stats {
@@ -28,6 +32,7 @@ impl Stats {
             up_packets: self.up_packets.load(Ordering::Relaxed),
             down_packets: self.down_packets.load(Ordering::Relaxed),
             rtt_ms: self.rtt_ms.load(Ordering::Relaxed),
+            probe_seen: self.probe_seen.load(Ordering::Relaxed),
         }
     }
 

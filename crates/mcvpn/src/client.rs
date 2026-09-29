@@ -15,8 +15,26 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
+/// TEST-NET-2 (RFC 5737) address used only to prove routing: never routed on
+/// the internet, sits in 128.0.0.0/1 so a working full tunnel MUST capture it.
+pub const PROBE_ADDR: [u8; 4] = [198, 51, 100, 77];
+
+/// Send one tiny UDP datagram to [`PROBE_ADDR`] from a normal OS socket. If the
+/// routing table really sends traffic into the tunnel device, the pump sees
+/// it and sets `Stats::probe_seen`. Do NOT use where the app itself is
+/// excluded from the VPN (Android excludes its own package).
+pub fn send_route_probe() {
+    if let Ok(sock) = std::net::UdpSocket::bind(("0.0.0.0", 0)) {
+        let _ = sock.send_to(
+            b"mcvpn-route-probe",
+            (std::net::Ipv4Addr::from(PROBE_ADDR), 9),
+        );
+    }
+}
+
 pub struct Connected {
     conn: Conn,
+    server_ip: Option<std::net::IpAddr>,
     crypto: TunnelCrypto,
     pub info: TunnelInfo,
     pub stats: SharedStats,
@@ -52,10 +70,31 @@ pub async fn connect(cfg: &ClientConfig) -> VpnResult<Connected> {
 /// Same as [`connect`] but reports into a caller-provided stats holder
 /// (GUIs and drivers observe live numbers).
 pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnResult<Connected> {
+    // Forgiving input: pasted tokens routinely carry invisible whitespace,
+    // and people type "ip:port" into the server field.
+    let cfg = &cfg.normalized();
+    if cfg.server.is_empty() {
+        return Err(VpnError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "server address is empty",
+        )));
+    }
+    if cfg.token.is_empty() {
+        return Err(VpnError::Kick(
+            "token is empty — paste the token (or the mcvpn:// link) from the server install output"
+                .into(),
+        ));
+    }
+    tracing::info!(server = %cfg.server, port = cfg.port, "connecting (TCP)");
     let mut conn = match format!("{}:{}", cfg.server, cfg.port).parse::<SocketAddr>() {
-        Ok(addr) => Conn::connect(addr, Duration::from_secs(10)).await?,
-        Err(_) => Conn::connect_host(&cfg.server, cfg.port, Duration::from_secs(10)).await?,
-    };
+        Ok(addr) => Conn::connect(addr, Duration::from_secs(10)).await,
+        Err(_) => Conn::connect_host(&cfg.server, cfg.port, Duration::from_secs(10)).await,
+    }
+    .map_err(|e| {
+        tracing::warn!(error = %e, "TCP connect failed");
+        e
+    })?;
+    tracing::info!("TCP connected; Minecraft handshake + login");
 
     // Handshake (host = the hostname we're connecting to, like a real client).
     let hs = Handshake {
@@ -81,6 +120,10 @@ pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnRe
     }
     let enc_req = packets::EncryptionRequest::decode(&body)
         .map_err(|_| VpnError::Mc(mc_protocol::McError::new("expected encryption request")))?;
+    tracing::info!(
+        pubkey_bytes = enc_req.public_key.len(),
+        "login: encryption request received"
+    );
 
     let mut secret = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut secret);
@@ -99,6 +142,7 @@ pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnRe
     )
     .await?;
     conn.enable_encryption(&secret);
+    tracing::info!("login: encryption enabled");
 
     // From here everything is encrypted: Set Compression, Login Success.
     let mut got_compression = false;
@@ -152,6 +196,7 @@ pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnRe
 
     let deadline = Duration::from_secs(10);
     let start = Instant::now();
+    tracing::info!("login: success; play state, authenticating tunnel");
     let (crypto, info) = loop {
         if start.elapsed() > deadline {
             return Err(VpnError::Timeout);
@@ -166,6 +211,10 @@ pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnRe
                 if cp.channel == packets::CHANNEL_TUNNEL {
                     match tunnel::decode(&cp.data)? {
                         tunnel::TunnelMsg::AuthOk(info) => {
+                            tracing::info!(
+                                ip = ?info.ip, mtu = info.mtu, dns = info.dns.len(),
+                                "tunnel authenticated"
+                            );
                             break (TunnelCrypto::derive(&secret, &nonce, Role::Client)?, info);
                         }
                         _ => return Err(VpnError::Auth),
@@ -181,8 +230,10 @@ pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnRe
         }
     };
 
+    let server_ip = conn.peer_addr().ok().map(|a| a.ip());
     Ok(Connected {
         conn,
+        server_ip,
         crypto,
         info,
         stats,
@@ -191,6 +242,12 @@ pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnRe
 }
 
 impl Connected {
+    /// The exact address the TCP connection is using. Desktop clients must
+    /// exempt it from the tunnel routes (routing-loop protection).
+    pub fn server_ip(&self) -> Option<std::net::IpAddr> {
+        self.server_ip
+    }
+
     pub fn info(&self) -> &TunnelInfo {
         &self.info
     }
@@ -242,6 +299,11 @@ impl Connected {
                     }
                     let mut frames = Vec::with_capacity(batch.len());
                     for ip_packet in batch {
+                        if ip_packet.len() >= 20 && ip_packet[16..20] == PROBE_ADDR {
+                            stats
+                                .probe_seen
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
                         stats.add_up(ip_packet.len() as u64);
                         let sealed = crypto.seal(&ip_packet)?;
                         frames.push(
@@ -337,7 +399,10 @@ pub enum ClientState {
 pub async fn run_client(
     cfg: ClientConfig,
     stats: SharedStats,
-    device_factory: impl Fn(&TunnelInfo) -> VpnResult<DeviceHandle> + Send + Sync + 'static,
+    device_factory: impl Fn(&TunnelInfo, Option<std::net::IpAddr>) -> VpnResult<DeviceHandle>
+        + Send
+        + Sync
+        + 'static,
     mut shutdown: watch::Receiver<bool>,
     on_state: impl Fn(ClientState),
 ) {
@@ -345,9 +410,20 @@ pub async fn run_client(
     let device_factory = Arc::new(device_factory);
     loop {
         on_state(ClientState::Connecting);
-        match connect_with_stats(&cfg, Arc::clone(&stats)).await {
+        // Cancelable: pressing Disconnect while "connecting" must not wait
+        // out a 10-20 s handshake timeout (or leave a zombie session).
+        let attempt = tokio::select! {
+            r = connect_with_stats(&cfg, Arc::clone(&stats)) => r,
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    on_state(ClientState::Disconnected);
+                    return;
+                }
+                continue;
+            }
+        };
+        match attempt {
             Ok(sess) => {
-                on_state(ClientState::Connected);
                 backoff = Duration::from_millis(500);
                 let info = sess.info().clone();
                 let (tx, rx) = watch::channel(false);
@@ -364,19 +440,29 @@ pub async fn run_client(
                         }
                     }
                 });
-                let device = match device_factory(&info) {
+                tracing::info!("creating the network device");
+                let device = match device_factory(&info, sess.server_ip()) {
                     Ok(d) => d,
                     Err(e) => {
+                        // Local network setup failed (adapter/routes/permissions).
+                        // Retrying cannot fix it: report and stop, with the reason.
+                        tracing::error!(error = %e, "device setup failed");
                         on_state(ClientState::Error(e.to_string()));
                         return;
                     }
                 };
+                // Only NOW is the VPN actually up: tunnel authenticated AND the
+                // OS device/routes configured. (Reporting "connected" before the
+                // device existed made the UI green while setup was still failing.)
+                tracing::info!("VPN is up");
+                on_state(ClientState::Connected);
                 match sess.attach_device(device, child_shutdown).await {
                     Ok(()) => {
                         on_state(ClientState::Disconnected);
                         return;
                     }
                     Err(e) => {
+                        tracing::warn!(error = %e, "session ended");
                         on_state(ClientState::Error(e.to_string()));
                         if !e.is_retryable() || *shutdown.borrow() {
                             return;
@@ -385,6 +471,7 @@ pub async fn run_client(
                 }
             }
             Err(e) => {
+                tracing::warn!(error = %e, "connect failed");
                 on_state(ClientState::Error(e.to_string()));
                 if !e.is_retryable() || *shutdown.borrow() {
                     return;

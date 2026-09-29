@@ -1,5 +1,8 @@
 package com.mcvpn.client
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.Manifest
 import android.content.pm.PackageManager
@@ -9,9 +12,13 @@ import android.net.VpnService
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.graphics.Typeface
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.app.ActivityCompat
@@ -24,6 +31,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tokenEdit: EditText
     private lateinit var connectBtn: Button
     private lateinit var disconnectBtn: Button
+    private lateinit var logBtn: Button
     private lateinit var statusText: TextView
     private lateinit var statsText: TextView
     private val handler = Handler(Looper.getMainLooper())
@@ -45,6 +53,7 @@ class MainActivity : AppCompatActivity() {
         tokenEdit = findViewById(R.id.tokenEdit)
         connectBtn = findViewById(R.id.connectBtn)
         disconnectBtn = findViewById(R.id.disconnectBtn)
+        logBtn = findViewById(R.id.logBtn)
         statusText = findViewById(R.id.statusText)
         statsText = findViewById(R.id.statsText)
 
@@ -53,6 +62,7 @@ class MainActivity : AppCompatActivity() {
         portEdit.setText(prefs.getInt("port", 25565).toString())
         tokenEdit.setText(prefs.getString("token", ""))
 
+        logBtn.setOnClickListener { showLog() }
         connectBtn.setOnClickListener { onConnect() }
         disconnectBtn.setOnClickListener {
             startService(Intent(this, TunnelService::class.java).putExtra("action", "disconnect"))
@@ -80,10 +90,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun onConnect() {
         val server = serverEdit.text.toString().trim()
-        val port = portEdit.text.toString().toIntOrNull() ?: 25565
-        val token = tokenEdit.text.toString()
-        if (server.isEmpty() || token.isEmpty()) {
-            statusText.text = "Fill in server and token"
+        val port = portEdit.text.toString().trim().toIntOrNull() ?: 25565
+        val token = tokenEdit.text.toString().trim()
+        // A full mcvpn:// link in the server field carries its own token.
+        if (server.isEmpty() || (token.isEmpty() && !server.contains("@"))) {
+            statusText.text = "Fill in server and token (or paste an mcvpn:// link)"
             return
         }
         getSharedPreferences("mcvpn", MODE_PRIVATE).edit()
@@ -102,8 +113,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun startVpn() {
         val server = serverEdit.text.toString().trim()
-        val port = portEdit.text.toString().toIntOrNull() ?: 25565
-        val token = tokenEdit.text.toString()
+        val port = portEdit.text.toString().trim().toIntOrNull() ?: 25565
+        val token = tokenEdit.text.toString().trim()
         val intent = Intent(this, TunnelService::class.java)
             .putExtra("action", "connect")
             .putExtra("server", server)
@@ -115,6 +126,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun refreshUi() {
         val active = TunnelService.running
+        TunnelService.libError?.let { TunnelService.lastError = it }
         connectBtn.isEnabled = !active
         disconnectBtn.isEnabled = active
         statsText.text = when {
@@ -144,6 +156,35 @@ class MainActivity : AppCompatActivity() {
                 }
             )
         )
+    }
+
+    private fun logText(): String {
+        val header = "mcvpn ${BuildInfo.VERSION} / Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.MANUFACTURER} ${Build.MODEL}\n" +
+            "state: running=${TunnelService.running} connecting=${TunnelService.connecting}\n" +
+            "last error: ${TunnelService.lastError.ifEmpty { "-" }}\n\n"
+        return header + TunnelService.lastLog.ifEmpty { "(no log yet — press CONNECT first)" }
+    }
+
+    private fun showLog() {
+        val text = logText()
+        val tv = TextView(this).apply {
+            setText(text)
+            typeface = Typeface.MONOSPACE
+            textSize = 11f
+            setTextIsSelectable(true)
+            setPadding(32, 24, 32, 24)
+        }
+        val scroll = ScrollView(this).apply { addView(tv) }
+        AlertDialog.Builder(this)
+            .setTitle("Log")
+            .setView(scroll)
+            .setPositiveButton("Copy") { _, _ ->
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("mcvpn log", text))
+                Toast.makeText(this, "Log copied", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Close", null)
+            .show()
     }
 
     private fun requestNotificationPermission() {

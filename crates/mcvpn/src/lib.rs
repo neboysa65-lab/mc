@@ -10,6 +10,7 @@ pub mod conn;
 pub mod device;
 pub mod error;
 pub mod ip_pool;
+pub mod logbuf;
 pub mod nat;
 pub mod probe;
 pub mod server;
