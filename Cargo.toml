@@ -39,6 +39,7 @@ flate2 = "1"
 clap = { version = "4", features = ["derive"] }
 mc-protocol = { path = "crates/mc-protocol" }
 mcvpn = { path = "crates/mcvpn" }
+jni = "0.21"
 
 [profile.release]
 opt-level = 3

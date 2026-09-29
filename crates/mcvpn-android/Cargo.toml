@@ -2,3 +2,17 @@
 name = "mcvpn-android"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "mcvpn Android JNI bridge (loaded by the Kotlin app)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mcvpn.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+jni.workspace = true
