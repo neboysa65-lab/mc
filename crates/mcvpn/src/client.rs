@@ -24,7 +24,9 @@ pub struct Connected {
 }
 
 async fn recv_timeout(conn: &mut Conn, d: Duration) -> VpnResult<Vec<u8>> {
-    tokio::time::timeout(d, conn.recv()).await.map_err(|_| VpnError::Timeout)?
+    tokio::time::timeout(d, conn.recv())
+        .await
+        .map_err(|_| VpnError::Timeout)?
 }
 
 /// Flatten a JSON chat component reason for display.
@@ -50,12 +52,14 @@ pub async fn connect(cfg: &ClientConfig) -> VpnResult<Connected> {
 /// Same as [`connect`] but reports into a caller-provided stats holder
 /// (GUIs and drivers observe live numbers).
 pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnResult<Connected> {
-    let addr: SocketAddr = format!("{}:{}", cfg.server, cfg.port).parse().map_err(|_| {
-        VpnError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("invalid server address {}:{}", cfg.server, cfg.port),
-        ))
-    })?;
+    let addr: SocketAddr = format!("{}:{}", cfg.server, cfg.port)
+        .parse()
+        .map_err(|_| {
+            VpnError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid server address {}:{}", cfg.server, cfg.port),
+            ))
+        })?;
     let mut conn = Conn::connect(addr, Duration::from_secs(10)).await?;
 
     // Handshake (host = the hostname we're connecting to, like a real client).
@@ -66,8 +70,13 @@ pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnRe
         next_state: 2,
     };
     conn.send(&hs.encode()).await?;
-    conn.send(&packets::LoginStart { name: crate::derive_username(&cfg.token) }.encode())
-        .await?;
+    conn.send(
+        &packets::LoginStart {
+            name: crate::derive_username(&cfg.token),
+        }
+        .encode(),
+    )
+    .await?;
 
     // Encryption request (like a vanilla client talking to an online-mode server).
     let body = recv_timeout(&mut conn, Duration::from_secs(10)).await?;
@@ -86,8 +95,14 @@ pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnRe
         &enc_req.verify_token,
         &mut rand::rngs::OsRng,
     )?;
-    conn.send(&packets::EncryptionResponse { shared_secret: enc_s, verify_token: enc_t }.encode())
-        .await?;
+    conn.send(
+        &packets::EncryptionResponse {
+            shared_secret: enc_s,
+            verify_token: enc_t,
+        }
+        .encode(),
+    )
+    .await?;
     conn.enable_encryption(&secret);
 
     // From here everything is encrypted: Set Compression, Login Success.
@@ -109,13 +124,21 @@ pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnRe
                 let dc = packets::LoginDisconnect::decode(&body)?;
                 return Err(VpnError::Kick(plain_reason(&dc.reason)));
             }
-            _ => return Err(VpnError::Mc(mc_protocol::McError::new("unexpected login packet"))),
+            _ => {
+                return Err(VpnError::Mc(mc_protocol::McError::new(
+                    "unexpected login packet",
+                )))
+            }
         }
     }
 
     // Play-state hello, exactly the burst a vanilla client sends.
-    conn.send(&packets::ClientSettings::default().encode()).await?;
-    let brand = CustomPayload { channel: packets::CHANNEL_BRAND.into(), data: b"vanilla".to_vec() };
+    conn.send(&packets::ClientSettings::default().encode())
+        .await?;
+    let brand = CustomPayload {
+        channel: packets::CHANNEL_BRAND.into(),
+        data: b"vanilla".to_vec(),
+    };
     conn.send(&brand.encode_sb()).await?;
     let register = CustomPayload {
         channel: packets::CHANNEL_REGISTER.into(),
@@ -163,7 +186,13 @@ pub async fn connect_with_stats(cfg: &ClientConfig, stats: SharedStats) -> VpnRe
         }
     };
 
-    Ok(Connected { conn, crypto, info, stats, cfg: cfg.clone() })
+    Ok(Connected {
+        conn,
+        crypto,
+        info,
+        stats,
+        cfg: cfg.clone(),
+    })
 }
 
 impl Connected {

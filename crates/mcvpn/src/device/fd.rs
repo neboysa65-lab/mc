@@ -30,7 +30,11 @@ pub fn from_raw_fd(name: &str, fd: RawFd) -> DeviceHandle {
             let mut read_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
             use std::io::Read;
             let mut buf = vec![0u8; 65536];
-            let mut pollfd = libc::pollfd { fd: read_fd, events: libc::POLLIN, revents: 0 };
+            let mut pollfd = libc::pollfd {
+                fd: read_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             loop {
                 if stop_reader.load(Ordering::Relaxed) {
                     break;

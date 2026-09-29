@@ -24,9 +24,18 @@ impl IpPool {
         let net: Ipv4Addr = net
             .parse()
             .map_err(|_| VpnError::Device(format!("bad network in {cidr}")))?;
-        let mask: u32 = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+        let mask: u32 = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix)
+        };
         let base = u32::from(net) & mask;
-        Ok(IpPool { base, prefix, used: HashSet::new(), next: base + 2 })
+        Ok(IpPool {
+            base,
+            prefix,
+            used: HashSet::new(),
+            next: base + 2,
+        })
     }
 
     pub fn gateway(&self) -> Ipv4Addr {
@@ -34,7 +43,11 @@ impl IpPool {
     }
 
     pub fn netmask(&self) -> Ipv4Addr {
-        let mask: u32 = if self.prefix == 0 { 0 } else { u32::MAX << (32 - self.prefix) };
+        let mask: u32 = if self.prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - self.prefix)
+        };
         Ipv4Addr::from(mask)
     }
 
@@ -43,7 +56,11 @@ impl IpPool {
     }
 
     pub fn contains(&self, ip: Ipv4Addr) -> bool {
-        let mask: u32 = if self.prefix == 0 { 0 } else { u32::MAX << (32 - self.prefix) };
+        let mask: u32 = if self.prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - self.prefix)
+        };
         (u32::from(ip) & mask) == self.base
     }
 

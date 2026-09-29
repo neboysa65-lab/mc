@@ -27,7 +27,15 @@ fn add_routes(ip: &Ipv4Addr) {
     // Split default route: two /1 routes via the adapter's own address.
     for net in ["0.0.0.0", "128.0.0.0"] {
         let _ = std::process::Command::new("route")
-            .args(["add", net, "mask", "128.0.0.0", &ip.to_string(), "metric", "1"])
+            .args([
+                "add",
+                net,
+                "mask",
+                "128.0.0.0",
+                &ip.to_string(),
+                "metric",
+                "1",
+            ])
             .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .output();
     }
@@ -48,8 +56,13 @@ pub fn open(info: &TunnelInfo) -> VpnResult<DeviceHandle> {
         .map_err(|e| VpnError::Device(format!("failed to load wintun.dll: {e}")))?;
     let adapter = match wintun::Adapter::open(&wintun, ADAPTER_NAME) {
         Ok(a) => a,
-        Err(_) => wintun::Adapter::create(&wintun, ADAPTER_NAME, ADAPTER_NAME, None)
-            .map_err(|e| VpnError::Device(format!("wintun adapter create failed (run as Administrator): {e}")))?,
+        Err(_) => {
+            wintun::Adapter::create(&wintun, ADAPTER_NAME, ADAPTER_NAME, None).map_err(|e| {
+                VpnError::Device(format!(
+                    "wintun adapter create failed (run as Administrator): {e}"
+                ))
+            })?
+        }
     };
     let _ = adapter.set_mtu(info.mtu as usize);
     let ip = Ipv4Addr::from(info.ip);
@@ -117,7 +130,7 @@ pub fn open(info: &TunnelInfo) -> VpnResult<DeviceHandle> {
         .map_err(|e| VpnError::Device(format!("thread spawn: {e}")))?;
 
     let cleanup_ip = ip;
-    DeviceHandle {
+    Ok(DeviceHandle {
         inbox: inbox_rx,
         outbox: outbox_tx,
         name: ADAPTER_NAME.to_string(),

@@ -30,7 +30,10 @@ impl VpnError {
     }
 
     pub fn is_retryable(&self) -> bool {
-        matches!(self, VpnError::Io(_) | VpnError::Timeout | VpnError::Shutdown)
+        matches!(
+            self,
+            VpnError::Io(_) | VpnError::Timeout | VpnError::Shutdown
+        )
     }
 }
 

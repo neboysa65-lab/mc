@@ -24,12 +24,24 @@ impl Conn {
     pub async fn connect(addr: SocketAddr, timeout: Duration) -> std::io::Result<Self> {
         let stream = tokio::time::timeout(timeout, TcpStream::connect(addr)).await??;
         Self::apply_socket_opts(&stream);
-        Ok(Conn { stream, parser: FrameParser::new(), dec: None, enc: None, threshold: None })
+        Ok(Conn {
+            stream,
+            parser: FrameParser::new(),
+            dec: None,
+            enc: None,
+            threshold: None,
+        })
     }
 
     pub fn from_stream(stream: TcpStream) -> Self {
         Self::apply_socket_opts(&stream);
-        Conn { stream, parser: FrameParser::new(), dec: None, enc: None, threshold: None }
+        Conn {
+            stream,
+            parser: FrameParser::new(),
+            dec: None,
+            enc: None,
+            threshold: None,
+        }
     }
 
     fn apply_socket_opts(stream: &TcpStream) {
@@ -53,7 +65,11 @@ impl Conn {
     }
 
     pub fn set_compression(&mut self, threshold: i32) {
-        self.threshold = if threshold >= 0 { Some(threshold as u32) } else { None };
+        self.threshold = if threshold >= 0 {
+            Some(threshold as u32)
+        } else {
+            None
+        };
     }
 
     pub fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
@@ -97,7 +113,10 @@ impl Conn {
     }
 
     /// Coalesce several packet bodies into a single TCP write.
-    pub async fn send_batch<I: IntoIterator<Item = Vec<u8>>>(&mut self, bodies: I) -> VpnResult<()> {
+    pub async fn send_batch<I: IntoIterator<Item = Vec<u8>>>(
+        &mut self,
+        bodies: I,
+    ) -> VpnResult<()> {
         let mut out = Vec::new();
         for body in bodies {
             self.encode_into(&body, &mut out);

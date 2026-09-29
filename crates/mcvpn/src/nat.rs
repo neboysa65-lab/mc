@@ -66,29 +66,67 @@ pub fn setup(tunnel_cidr: &str, tun_iface: &str) -> VpnResult<()> {
     }
 
     add(&[
-        "-t".into(), "nat".into(), "POSTROUTING".into(),
-        "-s".into(), tunnel_cidr.into(), "!".into(), "-o".into(), tun_iface.into(),
-        "-j".into(), "MASQUERADE".into(),
+        "-t".into(),
+        "nat".into(),
+        "POSTROUTING".into(),
+        "-s".into(),
+        tunnel_cidr.into(),
+        "!".into(),
+        "-o".into(),
+        tun_iface.into(),
+        "-j".into(),
+        "MASQUERADE".into(),
     ])?;
-    add(&["FORWARD".into(), "-i".into(), tun_iface.into(), "-j".into(), "ACCEPT".into()])?;
     add(&[
-        "FORWARD".into(), "-o".into(), tun_iface.into(),
-        "-m".into(), "conntrack".into(), "--ctstate".into(), "RELATED,ESTABLISHED".into(),
-        "-j".into(), "ACCEPT".into(),
+        "FORWARD".into(),
+        "-i".into(),
+        tun_iface.into(),
+        "-j".into(),
+        "ACCEPT".into(),
+    ])?;
+    add(&[
+        "FORWARD".into(),
+        "-o".into(),
+        tun_iface.into(),
+        "-m".into(),
+        "conntrack".into(),
+        "--ctstate".into(),
+        "RELATED,ESTABLISHED".into(),
+        "-j".into(),
+        "ACCEPT".into(),
     ])?;
     Ok(())
 }
 
 pub fn teardown(tunnel_cidr: &str, tun_iface: &str) {
     del_all(&[
-        "-t".into(), "nat".into(), "POSTROUTING".into(),
-        "-s".into(), tunnel_cidr.into(), "!".into(), "-o".into(), tun_iface.into(),
-        "-j".into(), "MASQUERADE".into(),
+        "-t".into(),
+        "nat".into(),
+        "POSTROUTING".into(),
+        "-s".into(),
+        tunnel_cidr.into(),
+        "!".into(),
+        "-o".into(),
+        tun_iface.into(),
+        "-j".into(),
+        "MASQUERADE".into(),
     ]);
-    del_all(&["FORWARD".into(), "-i".into(), tun_iface.into(), "-j".into(), "ACCEPT".into()]);
     del_all(&[
-        "FORWARD".into(), "-o".into(), tun_iface.into(),
-        "-m".into(), "conntrack".into(), "--ctstate".into(), "RELATED,ESTABLISHED".into(),
-        "-j".into(), "ACCEPT".into(),
+        "FORWARD".into(),
+        "-i".into(),
+        tun_iface.into(),
+        "-j".into(),
+        "ACCEPT".into(),
+    ]);
+    del_all(&[
+        "FORWARD".into(),
+        "-o".into(),
+        tun_iface.into(),
+        "-m".into(),
+        "conntrack".into(),
+        "--ctstate".into(),
+        "RELATED,ESTABLISHED".into(),
+        "-j".into(),
+        "ACCEPT".into(),
     ]);
 }

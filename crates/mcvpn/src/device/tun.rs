@@ -32,7 +32,11 @@ pub fn open(name: &str, addr_cidr: &str, mtu: u16) -> VpnResult<DeviceHandle> {
             io::Error::last_os_error()
         )));
     }
-    let mut req = IfReq { name: [0; 16], flags: IFF_TUN | IFF_NO_PI, _pad: [0; 22] };
+    let mut req = IfReq {
+        name: [0; 16],
+        flags: IFF_TUN | IFF_NO_PI,
+        _pad: [0; 22],
+    };
     let name_bytes = name.as_bytes();
     if name_bytes.len() >= 15 {
         unsafe { libc::close(fd) };
@@ -45,12 +49,23 @@ pub fn open(name: &str, addr_cidr: &str, mtu: u16) -> VpnResult<DeviceHandle> {
         unsafe { libc::close(fd) };
         return Err(VpnError::Device(format!("TUNSETIFF failed: {e}")));
     }
-    let real_name = String::from_utf8_lossy(&req.name).trim_end_matches('\0').to_string();
+    let real_name = String::from_utf8_lossy(&req.name)
+        .trim_end_matches('\0')
+        .to_string();
 
     // Interface up + address + MTU via iproute2 (same commands admins use).
     run(&["ip", "addr", "flush", "dev", &real_name])?;
     run(&["ip", "addr", "add", addr_cidr, "dev", &real_name])?;
-    run(&["ip", "link", "set", "dev", &real_name, "mtu", &mtu.to_string(), "up"])?;
+    run(&[
+        "ip",
+        "link",
+        "set",
+        "dev",
+        &real_name,
+        "mtu",
+        &mtu.to_string(),
+        "up",
+    ])?;
 
     let fd: RawFd = fd;
     Ok(super::fd::from_raw_fd(&real_name, fd))
@@ -97,6 +112,8 @@ mod tests {
         assert!(String::from_utf8_lossy(&out.stdout).contains("mtu 1400"));
         dev.stop_device();
         drop(dev);
-        let _ = std::process::Command::new("ip").args(["link", "del", "dev", "mcvpnt0"]).output();
+        let _ = std::process::Command::new("ip")
+            .args(["link", "del", "dev", "mcvpnt0"])
+            .output();
     }
 }

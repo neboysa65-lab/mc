@@ -76,7 +76,10 @@ pub async fn run(
     let prefix = pool.prefix();
     let stats: SharedStats = Arc::new(Stats::default());
     let (tun_out_tx, tun_out_rx) = mpsc::channel::<Vec<u8>>(1024);
-    let router = Arc::new(Router { by_ip: Mutex::new(HashMap::new()), tun_out: tun_out_tx });
+    let router = Arc::new(Router {
+        by_ip: Mutex::new(HashMap::new()),
+        tun_out: tun_out_tx,
+    });
 
     let mut dev = device;
     let router_task = tokio::spawn({
@@ -104,7 +107,8 @@ pub async fn run(
         }
     });
 
-    let rsa = mc_protocol::login_crypto::ServerRsaKey::generate(cfg.rsa_bits, &mut rand::rngs::OsRng)?;
+    let rsa =
+        mc_protocol::login_crypto::ServerRsaKey::generate(cfg.rsa_bits, &mut rand::rngs::OsRng)?;
     let shared = Arc::new(ServerShared {
         cfg,
         rsa,
@@ -120,7 +124,11 @@ pub async fn run(
     let listener = TcpListener::bind(bind_addr).await?;
     tracing::info!(
         "mcvpn server listening on {} (tunnel gw {} mtu {}, cidr {}/{})",
-        bind_addr, gw, shared.cfg.mtu, gw, prefix
+        bind_addr,
+        gw,
+        shared.cfg.mtu,
+        gw,
+        prefix
     );
 
     // device write pump: tunnel -> TUN
@@ -190,7 +198,10 @@ fn throttle_ok(shared: &ServerShared, ip: IpAddr) -> bool {
 }
 
 fn online_count(shared: &ServerShared) -> u32 {
-    shared.active_sessions.load(Ordering::Relaxed).max(shared.cfg.fake_online)
+    shared
+        .active_sessions
+        .load(Ordering::Relaxed)
+        .max(shared.cfg.fake_online)
 }
 
 async fn handle_conn(stream: TcpStream, shared: Arc<ServerShared>) -> VpnResult<()> {
@@ -210,7 +221,11 @@ async fn handle_conn(stream: TcpStream, shared: Arc<ServerShared>) -> VpnResult<
             mc_protocol::legacy::LegacyProbe::Ping(_) => {
                 let mut second = [0u8; 1];
                 let has_second = conn.read_raw_exact(&mut second).await.unwrap_or(0);
-                let second = if has_second == 1 { Some(second[0]) } else { None };
+                let second = if has_second == 1 {
+                    Some(second[0])
+                } else {
+                    None
+                };
                 mc_protocol::legacy::detect(first[0], second).unwrap()
             }
             p => p,
@@ -239,9 +254,11 @@ async fn respond_legacy(
         mc_protocol::legacy::LegacyProbe::Ping(true) => {
             mc_protocol::legacy::ping_response_v15(&shared.cfg.motd, online, shared.cfg.max_players)
         }
-        mc_protocol::legacy::LegacyProbe::Ping(false) => {
-            mc_protocol::legacy::ping_response_beta(&shared.cfg.motd, online, shared.cfg.max_players)
-        }
+        mc_protocol::legacy::LegacyProbe::Ping(false) => mc_protocol::legacy::ping_response_beta(
+            &shared.cfg.motd,
+            online,
+            shared.cfg.max_players,
+        ),
         mc_protocol::legacy::LegacyProbe::Handshake => mc_protocol::legacy::handshake_response(),
     };
     conn.send_raw(&bytes).await?;
@@ -249,7 +266,9 @@ async fn respond_legacy(
 }
 
 async fn recv_timeout(conn: &mut Conn, d: Duration) -> VpnResult<Vec<u8>> {
-    tokio::time::timeout(d, conn.recv()).await.map_err(|_| VpnError::Timeout)?
+    tokio::time::timeout(d, conn.recv())
+        .await
+        .map_err(|_| VpnError::Timeout)?
 }
 
 /// Server List Ping: handshake already parsed; answer status/ping and close.
@@ -268,11 +287,13 @@ async fn status_flow(mut conn: Conn, shared: &Arc<ServerShared>) -> VpnResult<()
         let ping_body = recv_timeout(&mut conn, Duration::from_secs(30)).await?;
         if ping_body[0] == status_id::SB_PING {
             let ping = packets::Ping::decode(&ping_body)?;
-            conn.send(&packets::Pong { time: ping.time }.encode()).await?;
+            conn.send(&packets::Pong { time: ping.time }.encode())
+                .await?;
         }
     } else if body[0] == status_id::SB_PING {
         let ping = packets::Ping::decode(&body)?;
-        conn.send(&packets::Pong { time: ping.time }.encode()).await?;
+        conn.send(&packets::Pong { time: ping.time }.encode())
+            .await?;
     }
     Ok(())
 }
@@ -291,7 +312,8 @@ async fn login_flow(
         } else {
             kick::outdated_client()
         };
-        conn.send(&packets::LoginDisconnect { reason }.encode()).await?;
+        conn.send(&packets::LoginDisconnect { reason }.encode())
+            .await?;
         return Ok(());
     }
 
@@ -330,25 +352,43 @@ async fn login_flow(
         .decrypt_response(&enc_resp.shared_secret, &enc_resp.verify_token)?;
     if !tunnel::token_eq(&token, &verify_token) {
         let reason = kick::json("Failed to verify username!");
-        conn.send(&packets::LoginDisconnect { reason }.encode()).await?;
+        conn.send(&packets::LoginDisconnect { reason }.encode())
+            .await?;
         return Ok(());
     }
     conn.enable_encryption(&secret);
 
     // Vanilla order: Set Compression (sent uncompressed framing — the client
     // enables compression only after parsing this packet), then Login Success.
-    conn.send(&packets::SetCompression { threshold: shared.cfg.compression_threshold as i32 }.encode())
-        .await?;
+    conn.send(
+        &packets::SetCompression {
+            threshold: shared.cfg.compression_threshold as i32,
+        }
+        .encode(),
+    )
+    .await?;
     conn.set_compression(shared.cfg.compression_threshold as i32);
     let uuid = mc_protocol::login_crypto::offline_uuid_string(&login_start.name);
-    conn.send(&packets::LoginSuccess { uuid, username: login_start.name.clone() }.encode())
-        .await?;
+    conn.send(
+        &packets::LoginSuccess {
+            uuid,
+            username: login_start.name.clone(),
+        }
+        .encode(),
+    )
+    .await?;
 
     // --- Play state ---
     let entity_id: i32 = rand::rngs::OsRng.next_u32() as i32;
-    let join = packets::JoinGame { entity_id, ..Default::default() };
+    let join = packets::JoinGame {
+        entity_id,
+        ..Default::default()
+    };
     conn.send(&join.encode()).await?;
-    let brand = CustomPayload { channel: packets::CHANNEL_BRAND.into(), data: b"vanilla".to_vec() };
+    let brand = CustomPayload {
+        channel: packets::CHANNEL_BRAND.into(),
+        data: b"vanilla".to_vec(),
+    };
     conn.send(&brand.encode_cb()).await?;
 
     play_session(conn, shared, login_start.name, secret).await
@@ -387,7 +427,8 @@ async fn play_session(
     let mut session = SessionGuard { shared, ip: None };
     let mut crypto: Option<TunnelCrypto> = None;
     let mut to_client_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
-    let mut auth_deadline = Some(Instant::now() + Duration::from_secs(shared.cfg.auth_timeout_secs));
+    let mut auth_deadline =
+        Some(Instant::now() + Duration::from_secs(shared.cfg.auth_timeout_secs));
 
     loop {
         let auth_wait = match (auth_deadline, crypto.is_none()) {
@@ -479,113 +520,111 @@ async fn play_session(
                     packets::CHANNEL_REGISTER | packets::CHANNEL_UNREGISTER => {
                         tracing::debug!(channels = ?String::from_utf8_lossy(&cp.data), "plugin channel registration");
                     }
-                    packets::CHANNEL_TUNNEL => {
-                        match tunnel::decode(&cp.data)? {
-                            tunnel::TunnelMsg::Auth { nonce, token } => {
-                                if crypto.is_some() {
-                                    let reason = kick::internal_error();
-                                    conn.send(&packets::PlayDisconnect { reason }.encode()).await?;
-                                    break;
-                                }
-                                if !tunnel::token_eq(&token, shared.cfg.token.as_bytes()) {
-                                    tracing::warn!(?username, "bad tunnel token, kicking");
-                                    let reason = kick::not_whitelisted();
-                                    conn.send(&packets::PlayDisconnect { reason }.encode()).await?;
-                                    break;
-                                }
-                                if shared.active_sessions.load(Ordering::Relaxed)
-                                    >= shared.cfg.max_clients
-                                {
-                                    let reason = kick::server_full();
-                                    conn.send(&packets::PlayDisconnect { reason }.encode()).await?;
-                                    break;
-                                }
-                                let ip = shared.pool.lock().unwrap().allocate();
-                                let Some(ip) = ip else {
-                                    let reason = kick::server_full();
-                                    conn.send(&packets::PlayDisconnect { reason }.encode()).await?;
-                                    break;
-                                };
-                                crypto = Some(TunnelCrypto::derive(&secret, &nonce, Role::Server)?);
-                                let (netmask, gateway) = {
-                                    let pool = shared.pool.lock().unwrap();
-                                    (pool.netmask().octets(), pool.gateway().octets())
-                                };
-                                let info = TunnelInfo {
-                                    ip: ip.octets(),
-                                    netmask,
-                                    gateway,
-                                    mtu: shared.cfg.mtu,
-                                    dns: shared
-                                        .cfg
-                                        .dns
-                                        .iter()
-                                        .filter_map(|d| d.parse::<Ipv4Addr>().ok())
-                                        .map(|d| d.octets())
-                                        .collect(),
-                                };
-                                let ok = CustomPayload {
-                                    channel: packets::CHANNEL_TUNNEL.into(),
-                                    data: tunnel::encode_auth_ok(&info),
-                                };
-                                conn.send(&ok.encode_cb()).await?;
-                                let (tx, rx) = mpsc::channel(1024);
-                                shared.router.register(ip, tx);
-                                to_client_rx = Some(rx);
-                                session.ip = Some(ip);
-                                shared.active_sessions.fetch_add(1, Ordering::Relaxed);
-                                auth_deadline = None;
-                                tracing::info!(?username, ip = %ip, "tunnel session established");
+                    packets::CHANNEL_TUNNEL => match tunnel::decode(&cp.data)? {
+                        tunnel::TunnelMsg::Auth { nonce, token } => {
+                            if crypto.is_some() {
+                                let reason = kick::internal_error();
+                                conn.send(&packets::PlayDisconnect { reason }.encode())
+                                    .await?;
+                                break;
                             }
-                            tunnel::TunnelMsg::Data(sealed) => {
-                                let Some(c) = crypto.as_mut() else { continue };
-                                match c.open(&sealed) {
-                                    Ok(ip_packet) => {
-                                        if ip_packet.len() >= 20 && ip_packet[0] >> 4 == 4 {
-                                            let src = Ipv4Addr::new(
-                                                ip_packet[12],
-                                                ip_packet[13],
-                                                ip_packet[14],
-                                                ip_packet[15],
-                                            );
-                                            if shared.pool.lock().unwrap().contains(src) {
-                                                shared.stats.add_down(ip_packet.len() as u64);
-                                                if shared
-                                                    .router
-                                                    .tun_out
-                                                    .send(ip_packet)
-                                                    .await
-                                                    .is_err()
-                                                {
-                                                    break;
-                                                }
+                            if !tunnel::token_eq(&token, shared.cfg.token.as_bytes()) {
+                                tracing::warn!(?username, "bad tunnel token, kicking");
+                                let reason = kick::not_whitelisted();
+                                conn.send(&packets::PlayDisconnect { reason }.encode())
+                                    .await?;
+                                break;
+                            }
+                            if shared.active_sessions.load(Ordering::Relaxed)
+                                >= shared.cfg.max_clients
+                            {
+                                let reason = kick::server_full();
+                                conn.send(&packets::PlayDisconnect { reason }.encode())
+                                    .await?;
+                                break;
+                            }
+                            let ip = shared.pool.lock().unwrap().allocate();
+                            let Some(ip) = ip else {
+                                let reason = kick::server_full();
+                                conn.send(&packets::PlayDisconnect { reason }.encode())
+                                    .await?;
+                                break;
+                            };
+                            crypto = Some(TunnelCrypto::derive(&secret, &nonce, Role::Server)?);
+                            let (netmask, gateway) = {
+                                let pool = shared.pool.lock().unwrap();
+                                (pool.netmask().octets(), pool.gateway().octets())
+                            };
+                            let info = TunnelInfo {
+                                ip: ip.octets(),
+                                netmask,
+                                gateway,
+                                mtu: shared.cfg.mtu,
+                                dns: shared
+                                    .cfg
+                                    .dns
+                                    .iter()
+                                    .filter_map(|d| d.parse::<Ipv4Addr>().ok())
+                                    .map(|d| d.octets())
+                                    .collect(),
+                            };
+                            let ok = CustomPayload {
+                                channel: packets::CHANNEL_TUNNEL.into(),
+                                data: tunnel::encode_auth_ok(&info),
+                            };
+                            conn.send(&ok.encode_cb()).await?;
+                            let (tx, rx) = mpsc::channel(1024);
+                            shared.router.register(ip, tx);
+                            to_client_rx = Some(rx);
+                            session.ip = Some(ip);
+                            shared.active_sessions.fetch_add(1, Ordering::Relaxed);
+                            auth_deadline = None;
+                            tracing::info!(?username, ip = %ip, "tunnel session established");
+                        }
+                        tunnel::TunnelMsg::Data(sealed) => {
+                            let Some(c) = crypto.as_mut() else { continue };
+                            match c.open(&sealed) {
+                                Ok(ip_packet) => {
+                                    if ip_packet.len() >= 20 && ip_packet[0] >> 4 == 4 {
+                                        let src = Ipv4Addr::new(
+                                            ip_packet[12],
+                                            ip_packet[13],
+                                            ip_packet[14],
+                                            ip_packet[15],
+                                        );
+                                        if shared.pool.lock().unwrap().contains(src) {
+                                            shared.stats.add_down(ip_packet.len() as u64);
+                                            if shared.router.tun_out.send(ip_packet).await.is_err()
+                                            {
+                                                break;
                                             }
                                         }
                                     }
-                                    Err(e) => {
-                                        tracing::warn!(?username, error = %e, "bad DATA message, kicking");
-                                        let reason = kick::internal_error();
-                                        conn.send(&packets::PlayDisconnect { reason }.encode()).await?;
-                                        break;
-                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(?username, error = %e, "bad DATA message, kicking");
+                                    let reason = kick::internal_error();
+                                    conn.send(&packets::PlayDisconnect { reason }.encode())
+                                        .await?;
+                                    break;
                                 }
                             }
-                            tunnel::TunnelMsg::Ping(v) => {
-                                if crypto.is_some() {
-                                    let pong = CustomPayload {
-                                        channel: packets::CHANNEL_TUNNEL.into(),
-                                        data: tunnel::encode_pong(v),
-                                    };
-                                    conn.send(&pong.encode_cb()).await?;
-                                }
-                            }
-                            tunnel::TunnelMsg::Close(_) => {
-                                tracing::info!(?username, "tunnel closed by client");
-                                break;
-                            }
-                            _ => {}
                         }
-                    }
+                        tunnel::TunnelMsg::Ping(v) => {
+                            if crypto.is_some() {
+                                let pong = CustomPayload {
+                                    channel: packets::CHANNEL_TUNNEL.into(),
+                                    data: tunnel::encode_pong(v),
+                                };
+                                conn.send(&pong.encode_cb()).await?;
+                            }
+                        }
+                        tunnel::TunnelMsg::Close(_) => {
+                            tracing::info!(?username, "tunnel closed by client");
+                            break;
+                        }
+                        _ => {}
+                    },
                     other => {
                         tracing::debug!(channel = other, "ignored plugin channel");
                     }
@@ -598,7 +637,8 @@ async fn play_session(
             _ => {
                 tracing::debug!(packet = id, "unknown serverbound play packet, kicking");
                 let reason = kick::internal_error();
-                conn.send(&packets::PlayDisconnect { reason }.encode()).await?;
+                conn.send(&packets::PlayDisconnect { reason }.encode())
+                    .await?;
                 break;
             }
         }

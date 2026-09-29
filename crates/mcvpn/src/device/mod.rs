@@ -47,4 +47,3 @@ impl Drop for DeviceHandle {
         }
     }
 }
-

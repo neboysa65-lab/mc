@@ -110,7 +110,10 @@ pub fn decode(msg: &[u8]) -> VpnResult<TunnelMsg> {
             if rest.len() != tlen || tlen > 4096 {
                 return Err(bad());
             }
-            TunnelMsg::Auth { nonce, token: rest.to_vec() }
+            TunnelMsg::Auth {
+                nonce,
+                token: rest.to_vec(),
+            }
         }
         MSG_AUTH_OK => {
             if r.len() < 15 {
@@ -130,7 +133,10 @@ pub fn decode(msg: &[u8]) -> VpnResult<TunnelMsg> {
                 netmask,
                 gateway,
                 mtu,
-                dns: rest.chunks_exact(4).map(|c| c.try_into().unwrap()).collect(),
+                dns: rest
+                    .chunks_exact(4)
+                    .map(|c| c.try_into().unwrap())
+                    .collect(),
             })
         }
         MSG_DATA => TunnelMsg::Data(r.to_vec()),
@@ -248,10 +254,7 @@ mod tests {
     #[test]
     fn tunnel_msg_roundtrip() {
         let auth = encode_auth(&[7u8; 16], b"tok");
-        assert!(matches!(
-            decode(&auth).unwrap(),
-            TunnelMsg::Auth { .. }
-        ));
+        assert!(matches!(decode(&auth).unwrap(), TunnelMsg::Auth { .. }));
         let ok = encode_auth_ok(&info());
         let TunnelMsg::AuthOk(i) = decode(&ok).unwrap() else {
             panic!()
