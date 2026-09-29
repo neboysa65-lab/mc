@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test protocol + core
+        run: cargo test -p mc-protocol -p mcvpn
+      - name: Check full workspace (incl. GUI and JNI)
+        run: cargo check --workspace --all-targets
+      - name: Build server/cli (release)
+        run: cargo build --release -p mcvpn
+      - name: Build android JNI for host sanity
+        run: cargo build --release -p mcvpn-android
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+        continue-on-error: true

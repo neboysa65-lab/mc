@@ -11,6 +11,9 @@ import org.json.JSONObject
 
 class TunnelService : VpnService() {
     companion object {
+        init {
++            System.loadLibrary("mcvpn")
+        }
         @Volatile var running = false
         @Volatile var lastStats = "{}"
         @Volatile var lastError = ""

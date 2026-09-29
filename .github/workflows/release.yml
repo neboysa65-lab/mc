@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  linux-server:
+    name: Linux server binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install aarch64 cross toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build amd64
+        run: cargo build --release -p mcvpn --bin mcvpn-server --bin mcvpn-cli --target x86_64-unknown-linux-gnu
+      - name: Build arm64
+        run: cargo build --release -p mcvpn --bin mcvpn-server --bin mcvpn-cli --target aarch64-unknown-linux-gnu
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      - name: Package
+        run: |
+          cd target/x86_64-unknown-linux-gnu/release
+          tar czf ../../../mcvpn-server-linux-amd64.tar.gz mcvpn-server mcvpn-cli
+          cd ../../..
+          cd target/aarch64-unknown-linux-gnu/release
+          tar czf ../../../mcvpn-server-linux-arm64.tar.gz mcvpn-server mcvpn-cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-server
+          path: mcvpn-server-linux-*.tar.gz
+
+  windows-client:
+    name: Windows client (.exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release -p mcvpn-gui
+      - name: Download WinTun
+        shell: bash
+        run: |
+          curl -fsSL -o wintun.zip https://www.wintun.net/build/wintun-0.14.3.zip
+          tar -xf wintun.zip
+          cp wintun/bin/amd64/wintun.dll target/release/
+          cp wintun/bin/amd64/wintun.dll .
+      - name: Package
+        shell: bash
+        run: |
+          cp target/release/mcvpn.exe .
+          7z a mcvpn-windows-x64.zip mcvpn.exe wintun.dll
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-client
+          path: mcvpn-windows-x64.zip
+
+  android-client:
+    name: Android client (.apk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK
+        run: sdkmanager "ndk;27.0.11902866" >/dev/null
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+      - uses: Swatinem/rust-cache@v2
+      - name: Build native libs
+        run: |
+          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.11902866
+          export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android24-clang
+          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=$TOOLCHAIN/armv7a-linux-androideabi24-clang
+          cargo build --release -p mcvpn-android --target aarch64-linux-android
+          cargo build --release -p mcvpn-android --target armv7-linux-androideabi
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a android/app/src/main/jniLibs/armeabi-v7a
+          cp target/aarch64-linux-android/release/libmcvpn_android.so android/app/src/main/jniLibs/arm64-v8a/libmcvpn.so
+          cp target/armv7-linux-androideabi/release/libmcvpn_android.so android/app/src/main/jniLibs/armeabi-v7a/libmcvpn.so
+      - name: Build APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk ../mcvpn-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-client
+          path: mcvpn-android.apk
+
+  release:
+    name: Publish release
+    needs: [linux-server, windows-client, android-client]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --title "mcvpn $TAG" --generate-notes || true
+          gh release upload "$TAG" dist/mcvpn-server-linux-amd64.tar.gz dist/mcvpn-server-linux-arm64.tar.gz dist/mcvpn-windows-x64.zip dist/mcvpn-android.apk --clobber
