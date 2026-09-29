@@ -11,6 +11,7 @@ pub mod device;
 pub mod error;
 pub mod ip_pool;
 pub mod nat;
+pub mod probe;
 pub mod server;
 pub mod stats;
 pub mod tunnel;

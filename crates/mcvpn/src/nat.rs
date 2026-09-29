@@ -47,6 +47,15 @@ fn add(args: &[String]) -> VpnResult<()> {
     iptables("-A", args)
 }
 
+/// FORWARD rules are INSERTED (not appended) so pre-existing firewall
+/// chains (ufw etc.) cannot drop tunnel traffic before our rules match.
+fn add_forward(args: &[String]) -> VpnResult<()> {
+    if have_rule(args) {
+        return Ok(());
+    }
+    iptables("-I", args)
+}
+
 fn del_all(args: &[String]) {
     while have_rule(args) {
         if iptables("-D", args).is_err() {
@@ -77,14 +86,14 @@ pub fn setup(tunnel_cidr: &str, tun_iface: &str) -> VpnResult<()> {
         "-j".into(),
         "MASQUERADE".into(),
     ])?;
-    add(&[
+    add_forward(&[
         "FORWARD".into(),
         "-i".into(),
         tun_iface.into(),
         "-j".into(),
         "ACCEPT".into(),
     ])?;
-    add(&[
+    add_forward(&[
         "FORWARD".into(),
         "-o".into(),
         tun_iface.into(),

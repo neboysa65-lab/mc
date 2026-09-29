@@ -8,6 +8,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub fn from_raw_fd(name: &str, fd: RawFd) -> DeviceHandle {
+    let name = name.to_string();
+    let rd_name = format!("{name}-rd");
+    let wr_name = format!("{name}-wr");
+    let dev_name = name.clone();
     let (inbox_tx, inbox_rx) = mpsc::channel::<Vec<u8>>(512);
     let (outbox_tx, mut outbox_rx) = mpsc::channel::<Vec<u8>>(512);
 
@@ -21,11 +25,12 @@ pub fn from_raw_fd(name: &str, fd: RawFd) -> DeviceHandle {
     }
 
     let stop = Arc::new(AtomicBool::new(false));
+    let reader_name = name.clone();
     let stop_reader = Arc::clone(&stop);
     let stop_writer = Arc::clone(&stop);
 
     std::thread::Builder::new()
-        .name(format!("{name}-rd"))
+        .name(rd_name)
         .spawn(move || {
             let mut read_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
             use std::io::Read;
@@ -40,7 +45,12 @@ pub fn from_raw_fd(name: &str, fd: RawFd) -> DeviceHandle {
                     break;
                 }
                 let r = unsafe { libc::poll(&mut pollfd, 1, 200) };
-                if r < 0 {
+                if r == -1 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::Interrupted {
+                        continue; // EINTR must not kill the data plane
+                    }
+                    tracing::warn!(device = %reader_name, error = %err, "device reader poll failed");
                     break;
                 }
                 if r == 0 {
@@ -74,7 +84,7 @@ pub fn from_raw_fd(name: &str, fd: RawFd) -> DeviceHandle {
         .expect("spawn device reader");
 
     std::thread::Builder::new()
-        .name(format!("{name}-wr"))
+        .name(wr_name)
         .spawn(move || {
             let mut write_file = unsafe { std::fs::File::from_raw_fd(write_fd) };
             use std::io::Write;
@@ -92,7 +102,7 @@ pub fn from_raw_fd(name: &str, fd: RawFd) -> DeviceHandle {
     let mut handle = DeviceHandle {
         inbox: inbox_rx,
         outbox: outbox_tx,
-        name: name.to_string(),
+        name: dev_name,
         stop: None,
         cleanup: None,
     };

@@ -85,6 +85,36 @@ pub async fn run(
     });
 
     let mut dev = device;
+    // TUN data-plane self-test: write an ICMP echo to our own gateway
+    // address through the TUN and wait for the kernel's reply to come back
+    // through it. This exercises the exact path client packets take
+    // (fd writer -> kernel -> fd reader) BEFORE any client connects, so a
+    // broken kernel/container setup is loud in the logs instead of showing
+    // up as "connected but no internet".
+    if !cfg.mock_device {
+        let gw = pool.gateway();
+        let probe = crate::probe::icmp_echo_request(gw.octets(), gw.octets(), 0x6D63, 1);
+        let _ = dev.outbox.send(probe).await;
+        match tokio::time::timeout(Duration::from_secs(3), dev.inbox.recv()).await {
+            Ok(Some(pkt)) if pkt.len() > 20 && pkt[20] == 0 => {
+                tracing::info!("TUN self-test: OK (kernel returned our probe via TUN)");
+            }
+            other => {
+                let detail = match other {
+                    Ok(Some(p)) => format!("unexpected packet ({} bytes)", p.len()),
+                    Ok(None) => "device closed".into(),
+                    Err(_) => "timeout: no reply from kernel via TUN within 3s".into(),
+                };
+                let iface = dev_name(&cfg);
+                tracing::error!(
+                    "TUN self-test FAILED ({detail}). Packets written to the TUN are not \
+                     returned by the kernel: clients will connect but have no internet. \
+                     Check: `ip addr show {iface}` and `ip link show {iface}`, and whether \
+                     this VPS fully supports TUN networking (containers/OpenVZ often do not)."
+                );
+            }
+        }
+    }
     let router_task = tokio::spawn({
         let router = Arc::clone(&router);
         let mut inbox = std::mem::replace(&mut dev.inbox, mpsc::channel(1).1);
@@ -194,6 +224,10 @@ pub async fn run(
     write_pump.abort();
     router_task.abort();
     Ok(())
+}
+
+fn dev_name(_cfg: &ServerConfig) -> &'static str {
+    "mcvpn0"
 }
 
 fn throttle_ok(shared: &ServerShared, ip: IpAddr) -> bool {

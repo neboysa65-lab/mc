@@ -340,6 +340,16 @@ impl eframe::App for App {
                                 .unwrap_or_else(|| "-".into()),
                             fmt_duration(uptime),
                         ));
+                        if self.totals.0 > 0 && self.totals.1 == 0 {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "⚠ no data returning through the tunnel — the server \
+                                     side may be broken. Check its log: journalctl -u mcvpn",
+                                )
+                                .color(egui::Color32::from_rgb(220, 180, 60)),
+                            );
+                        }
                     }
                     UiState::Connecting => {
                         ui.add_enabled(

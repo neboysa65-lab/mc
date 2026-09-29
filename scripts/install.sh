@@ -30,6 +30,17 @@ tar xzf "$TMP/mcvpn.tar.gz" -C "$TMP"
 install -m 755 "$TMP/mcvpn-server" "$BIN_DIR/mcvpn-server"
 command -v mcvpn-cli >/dev/null 2>&1 || install -m 755 "$TMP/mcvpn-cli" "$BIN_DIR/mcvpn-cli" 2>/dev/null || true
 
+echo "==> prerequisites"
+if ! command -v iptables >/dev/null 2>&1; then
+  (apt-get install -y iptables >/dev/null 2>&1 || apt-get update -qq && apt-get install -y iptables >/dev/null 2>&1) || true
+fi
+if ! command -v iptables >/dev/null 2>&1; then
+  echo "    WARNING: iptables not found — the server needs it for NAT (no client internet without it)"
+fi
+# Persist ip_forward across reboots (the server also sets it at runtime).
+echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-mcvpn.conf
+sysctl -p /etc/sysctl.d/99-mcvpn.conf >/dev/null 2>&1 || true
+
 echo "==> config"
 mkdir -p "$CONF_DIR"
 if [ -f "$CONF" ]; then
@@ -83,6 +94,21 @@ if [ "$(ps -p 1 -o comm= 2>/dev/null)" = "systemd" ] && command -v systemctl >/d
     exit 1
   fi
   echo "    mcvpn.service active (logs: journalctl -u mcvpn -f)"
+  # Server startup diagnostics: TUN data-plane self-test + NAT outcome.
+  sleep 1
+  SELFTEST="$(journalctl -u mcvpn -n 40 --no-pager 2>/dev/null | grep -m1 "TUN self-test" || true)"
+  if [ -n "$SELFTEST" ]; then
+    echo "    $SELFTEST"
+    case "$SELFTEST" in
+      *"self-test: OK"*) : ;;
+      *) echo "    !!! The server reports its TUN data plane is broken on this host."
+         echo "    !!! Clients will connect but will NOT have internet."
+         echo "    !!! Check 'ip addr show mcvpn0' — and whether this VPS fully supports"
+         echo "    !!! TUN networking (LXC/OpenVZ containers often do not)." ;;
+    esac
+  fi
+  NATLINE="$(journalctl -u mcvpn -n 40 --no-pager 2>/dev/null | grep -m1 "NAT" || true)"
+  [ -n "$NATLINE" ] && echo "    $NATLINE"
 else
   echo "    systemd not detected (container?) — starting under nohup instead"
   nohup "$BIN_DIR/mcvpn-server" --config "$CONF" >/var/log/mcvpn.log 2>&1 &

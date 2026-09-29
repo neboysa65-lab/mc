@@ -1,6 +1,11 @@
 //! Windows device via WinTun (the same driver WireGuard-for-Windows uses).
-//! Requires wintun.dll next to the exe (or on PATH) and admin rights for
-//! adapter creation and routes.
+//! Requires wintun.dll next to the exe and Administrator rights (the
+//! embedded manifest auto-elevates; see mcvpn-gui/build.rs).
+//!
+//! All OS configuration (address, DNS, MTU, routes) is done with our own
+//! netsh/route calls: hidden (CREATE_NO_WINDOW — the wintun crate's built-in
+//! netsh calls flash console windows) and CHECKED — a failed route no longer
+//! leaves the client "connected" while traffic bypasses the tunnel.
 
 use super::DeviceHandle;
 use crate::error::{VpnError, VpnResult};
@@ -15,6 +20,7 @@ use tokio::sync::mpsc;
 use std::os::windows::process::CommandExt;
 
 pub const ADAPTER_NAME: &str = "mcvpn";
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn dll_path() -> PathBuf {
     std::env::current_exe()
@@ -23,30 +29,156 @@ fn dll_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("wintun.dll"))
 }
 
-fn add_routes(ip: &Ipv4Addr) {
-    // Split default route: two /1 routes via the adapter's own address.
-    for net in ["0.0.0.0", "128.0.0.0"] {
-        let _ = std::process::Command::new("route")
-            .args([
-                "add",
-                net,
-                "mask",
-                "128.0.0.0",
-                &ip.to_string(),
-                "metric",
-                "1",
-            ])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .output();
+fn run_checked(cmd: &str, args: &[&str]) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    let out = std::process::Command::new(cmd)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("{cmd}: {e}"))?;
+    #[cfg(not(target_os = "windows"))]
+    let out = std::process::Command::new(cmd)
+        .args(args)
+        .output()
+        .map_err(|e| format!("{cmd}: {e}"))?;
+    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    if out.status.success() {
+        Ok(text)
+    } else {
+        Err(format!("{cmd} {} failed: {}", args.join(" "), text.trim()))
     }
+}
+
+fn run_ignored(cmd: &str, args: &[&str]) {
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new(cmd)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    #[cfg(not(target_os = "windows"))]
+    let _ = std::process::Command::new(cmd).args(args).output();
+}
+
+/// Set address + netmask on the adapter. Checked: without an address the
+/// routes below cannot work, so a failure here must fail the connection.
+fn set_address(adapter: &str, ip: &Ipv4Addr, mask: &Ipv4Addr) -> Result<(), String> {
+    run_checked(
+        "netsh",
+        &[
+            "interface",
+            "ip",
+            "set",
+            "address",
+            &format!("name={adapter}"),
+            "source=static",
+            &format!("address={ip}"),
+            &format!("mask={mask}"),
+        ],
+    )
+    .map(|_| ())
+}
+
+fn set_dns(adapter: &str, dns: &[[u8; 4]]) -> Result<(), String> {
+    let Some(first) = dns.first() else {
+        return Ok(());
+    };
+    let f = Ipv4Addr::from(*first);
+    run_checked(
+        "netsh",
+        &[
+            "interface",
+            "ip",
+            "set",
+            "dnsservers",
+            &format!("name={adapter}"),
+            "source=static",
+            &format!("address={f}"),
+            "validate=no",
+        ],
+    )
+    .map(|_| ())?;
+    for (i, d) in dns.iter().enumerate().skip(1) {
+        let d = Ipv4Addr::from(*d);
+        run_checked(
+            "netsh",
+            &[
+                "interface",
+                "ip",
+                "add",
+                "dnsservers",
+                &format!("name={adapter}"),
+                &format!("address={d}"),
+                &format!("index={}", i + 1),
+                "validate=no",
+            ],
+        )
+        .map(|_| ())?;
+    }
+    Ok(())
+}
+
+/// MTU is best-effort: some Windows builds reject the subinterface form and
+/// the default (1400) still works for the data plane.
+fn set_mtu(adapter: &str, mtu: u16) {
+    let _ = run_checked(
+        "netsh",
+        &[
+            "interface",
+            "ipv4",
+            "set",
+            "subinterface",
+            adapter,
+            &format!("mtu={mtu}"),
+            "store=active",
+        ],
+    );
+}
+
+/// Install the split-default routes through the adapter. CHECKED: if these
+/// fail, traffic bypasses the tunnel — the client must report it loudly
+/// instead of showing "connected" with the user's real IP.
+fn add_routes(ip: &Ipv4Addr) -> Result<(), String> {
+    for net in ["0.0.0.0", "128.0.0.0"] {
+        let spec = [
+            "add",
+            net,
+            "mask",
+            "128.0.0.0",
+            &ip.to_string(),
+            "metric",
+            "1",
+        ];
+        match run_checked("route", &spec) {
+            Ok(_) => {}
+            // A leftover route from a previous run: update it instead.
+            Err(add_err) => {
+                let change = [
+                    "change",
+                    net,
+                    "mask",
+                    "128.0.0.0",
+                    &ip.to_string(),
+                    "metric",
+                    "1",
+                ];
+                if run_checked("route", &change).is_err() {
+                    return Err(format!(
+                        "route {net} could not be installed (tried add and change): {add_err}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn remove_routes(ip: &Ipv4Addr) {
     for net in ["0.0.0.0", "128.0.0.0"] {
-        let _ = std::process::Command::new("route")
-            .args(["delete", net, "mask", "128.0.0.0", &ip.to_string()])
-            .creation_flags(0x08000000)
-            .output();
+        run_ignored(
+            "route",
+            &["delete", net, "mask", "128.0.0.0", &ip.to_string()],
+        );
     }
 }
 
@@ -64,22 +196,18 @@ pub fn open(info: &TunnelInfo) -> VpnResult<DeviceHandle> {
             })?
         }
     };
-    let _ = adapter.set_mtu(info.mtu as usize);
+    let adapter_name = adapter
+        .get_name()
+        .map_err(|e| VpnError::Device(format!("wintun adapter name: {e}")))?;
+
     let ip = Ipv4Addr::from(info.ip);
     let mask = Ipv4Addr::from(info.netmask);
-    adapter
-        .set_address(ip)
-        .map_err(|e| VpnError::Device(format!("set address failed: {e}")))?;
-    let _ = adapter.set_netmask(mask);
-    let dns: Vec<std::net::IpAddr> = info
-        .dns
-        .iter()
-        .map(|d| std::net::IpAddr::V4(Ipv4Addr::from(*d)))
-        .collect();
-    if !dns.is_empty() {
-        let _ = adapter.set_dns_servers(&dns);
-    }
-    add_routes(&ip);
+    set_address(&adapter_name, &ip, &mask)
+        .map_err(|e| VpnError::Device(format!("adapter address: {e}")))?;
+    set_dns(&adapter_name, &info.dns).map_err(|e| VpnError::Device(format!("adapter DNS: {e}")))?;
+    set_mtu(&adapter_name, info.mtu);
+    add_routes(&ip)
+        .map_err(|e| VpnError::Device(format!("routing (traffic would bypass the tunnel): {e}")))?;
 
     let session = Arc::new(
         adapter
@@ -106,10 +234,7 @@ pub fn open(info: &TunnelInfo) -> VpnResult<DeviceHandle> {
                         break;
                     }
                 }
-                Err(_) => {
-                    // Session was shut down.
-                    break;
-                }
+                Err(_) => break, // session shut down
             }
         })
         .map_err(|e| VpnError::Device(format!("thread spawn: {e}")))?;

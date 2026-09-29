@@ -53,6 +53,13 @@ struct Args {
     /// Timing log path (tsv: ts_us dir conn len)
     #[arg(long, default_value = "verify-capture.tsv")]
     tsv: String,
+    /// Remote mode: verify a LIVE server at this host (no local server,
+    /// no tee capture; DNS/ICMP/soak run against the real deployment).
+    #[arg(long)]
+    host: Option<String>,
+    /// Token to use (local mode uses its own; remote requires this).
+    #[arg(long)]
+    token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -344,9 +351,9 @@ struct ClientRunner {
     info: TunnelInfo,
 }
 
-async fn connect_client(port: u16, token: &str) -> anyhow::Result<ClientRunner> {
+async fn connect_client_host(host: &str, port: u16, token: &str) -> anyhow::Result<ClientRunner> {
     let cfg = ClientConfig {
-        server: "127.0.0.1".into(),
+        server: host.into(),
         port,
         token: token.into(),
         ping_interval_secs: 1,
@@ -377,21 +384,34 @@ async fn main() -> anyhow::Result<()> {
         .try_init();
     let cap = Arc::new(Capture::default());
 
-    // Tee on the Minecraft-facing port; real server behind it.
-    tokio::spawn(run_tee(args.port, 25566, Arc::clone(&cap)));
-    let token_a = "verify-token-alpha";
+    // Remote mode: everything runs against a LIVE server (their VPS).
+    let remote_host = args.host.clone();
+    let token_a = args
+        .token
+        .clone()
+        .unwrap_or_else(|| "verify-token-alpha".into());
     let token_b = "verify-token-beta";
-    let (server_task, server_switch) = start_server(25566, token_a).await;
-    // Wait until the tee listener is actually up.
-    for _ in 0..100 {
-        if TcpStream::connect(("127.0.0.1", args.port)).await.is_ok() {
-            break;
+    let mut server_task = None;
+    let mut server_switch = None;
+    if remote_host.is_none() {
+        // Tee on the Minecraft-facing port; real server behind it.
+        tokio::spawn(run_tee(args.port, 25566, Arc::clone(&cap)));
+        let (task, switch) = start_server(25566, &token_a).await;
+        server_task = Some(task);
+        server_switch = Some(switch);
+        // Wait until the tee listener is actually up.
+        for _ in 0..100 {
+            if TcpStream::connect(("127.0.0.1", args.port)).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     println!(
-        "== mcvpn verification: {} client(s), {}s soak ==",
-        args.clients, args.seconds
+        "== mcvpn verification: {} client(s), {}s soak, target: {} ==",
+        args.clients,
+        args.seconds,
+        remote_host.clone().unwrap_or_else(|| "local".into()),
     );
 
     let mut runners = Vec::new();
@@ -400,9 +420,10 @@ async fn main() -> anyhow::Result<()> {
         let token = if args.mixed && i % 2 == 1 {
             token_b
         } else {
-            token_a
+            token_a.as_str()
         };
-        let r = connect_client(args.port, token).await?;
+        let host = remote_host.clone().unwrap_or_else(|| "127.0.0.1".into());
+        let r = connect_client_host(&host, args.port, token).await?;
         ips.push(Ipv4Addr::from(r.info.ip));
         runners.push(r);
     }
@@ -473,6 +494,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ICMP full-path RTT per client.
     let mut icmp_rtts = Vec::new();
+    let mut gw_rtts = Vec::new();
     for (i, r) in runners.iter_mut().enumerate() {
         let pkt = fake_ip(r.info.ip, [1, 1, 1, 1], 1, &icmp_echo_request(i as u16, 1));
         let t0 = Instant::now();
@@ -485,8 +507,30 @@ async fn main() -> anyhow::Result<()> {
         if reply.len() > 20 && reply[20] == 0 {
             icmp_rtts.push(t0.elapsed().as_millis() as u64);
         }
+        // Gateway ping: answered by the server's own kernel (no NAT or
+        // forwarding needed). If this answers but 1.1.1.1 doesn't, the
+        // tunnel data plane is fine and the server's NAT/forwarding broke.
+        let gw_pkt = fake_ip(r.info.ip, r.info.gateway, 1, &icmp_echo_request(0x0E0E, 1));
+        let t1 = Instant::now();
+        r.os_side.outbox.send(gw_pkt).await?;
+        if let Ok(Some(reply)) =
+            tokio::time::timeout(Duration::from_secs(5), r.os_side.inbox.recv()).await
+        {
+            if reply.len() > 20 && reply[20] == 0 {
+                gw_rtts.push(t1.elapsed().as_millis() as u64);
+            }
+        }
     }
     println!("ICMP full-path RTT: {:?} ms", icmp_rtts);
+    println!(
+        "gateway ping RTT (kernel-local, no NAT): {:?} ms{}",
+        gw_rtts,
+        if gw_rtts.is_empty() {
+            ""
+        } else {
+            "  => tunnel data plane OK"
+        }
+    );
 
     // Throughput + stability soak: all clients push 1300B packets continuously.
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
@@ -558,11 +602,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Reconnect test: kill the server, restart, expect the client to come back.
     let mut reconnect = serde_json::json!({"skipped": true});
-    if args.reconnect {
+    if args.reconnect && remote_host.is_some() {
+        println!("reconnect: skipped in remote mode (needs control of the server)");
+    } else if args.reconnect {
         let cfg = ClientConfig {
             server: "127.0.0.1".into(),
             port: args.port,
-            token: token_a.into(),
+            token: token_a.clone().into(),
             ping_interval_secs: 1,
             stealth_tick: true,
             auto_reconnect: true,
@@ -591,14 +637,14 @@ async fn main() -> anyhow::Result<()> {
             },
         ));
         tokio::time::sleep(Duration::from_secs(3)).await;
-        server_switch.send(true).ok();
+        server_switch.as_ref().unwrap().send(true).ok();
         // Give the server a moment to drain live sessions (graceful close),
         // so the client actually sees the disconnect instead of a half-open TCP.
         tokio::time::sleep(Duration::from_secs(1)).await;
-        server_task.abort();
+        server_task.as_ref().unwrap().abort();
         println!("reconnect: server killed (graceful: sessions closed)");
         tokio::time::sleep(Duration::from_secs(2)).await;
-        let _server2 = start_server(25566, token_a).await;
+        let _server2 = start_server(25566, &token_a).await;
         let mut back = false;
         for _ in 0..30 {
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -625,6 +671,7 @@ async fn main() -> anyhow::Result<()> {
     write_tsv(&args.tsv, &cap)?;
     write_pcap(&args.pcap, args.port, &cap)?;
     let report = serde_json::json!({
+        "target": remote_host.clone().unwrap_or_else(|| "local".into()),
         "clients": args.clients,
         "tokens": if args.mixed { "mixed" } else { "same" },
         "soak_seconds": args.seconds,
