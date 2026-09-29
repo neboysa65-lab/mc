@@ -147,6 +147,12 @@ impl FrameParser {
                             "uncompressed packet is at/above compression threshold",
                         ));
                     }
+                    // A packet must carry at least its ID byte. An empty one
+                    // (`[len=1][dataLen=0]`) used to reach `body[0]` in the
+                    // callers and panic the whole server.
+                    if payload.is_empty() {
+                        return Err(McError::new("empty packet"));
+                    }
                     Ok(Some(payload.to_vec()))
                 } else {
                     if (dl as u32) < th {
@@ -156,6 +162,9 @@ impl FrameParser {
                         return Err(McError::new("uncompressed size exceeds hard cap"));
                     }
                     let body = compress::inflate(payload, dl as usize)?;
+                    if body.is_empty() {
+                        return Err(McError::new("empty packet"));
+                    }
                     Ok(Some(body))
                 }
             }
@@ -204,6 +213,15 @@ mod tests {
         let mut p = FrameParser::new();
         p.push(&[0x00]);
         assert!(p.next_packet(None).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_compressed_packet() {
+        // [len=1][dataLen=0] with compression on: a zero-byte packet body
+        // that used to reach `body[0]` and panic the whole server.
+        let mut p = FrameParser::new();
+        p.push(&[0x01, 0x00]);
+        assert!(p.next_packet(Some(256)).is_err());
     }
 
     #[test]

@@ -287,6 +287,10 @@ fn online_count(shared: &ServerShared) -> u32 {
 }
 
 async fn handle_conn(stream: TcpStream, shared: Arc<ServerShared>) -> VpnResult<()> {
+    let peer = stream
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "?".into());
     let mut conn = Conn::from_stream(stream);
 
     // --- Legacy probe detection (before any framing), like BungeeCord ---
@@ -321,7 +325,17 @@ async fn handle_conn(stream: TcpStream, shared: Arc<ServerShared>) -> VpnResult<
     let handshake = Handshake::decode(&body)?;
     match handshake.next_state {
         1 => status_flow(conn, &shared).await,
-        2 => login_flow(conn, &shared, handshake).await,
+        2 => {
+            let r = login_flow(conn, &shared, handshake).await;
+            // Real clients that got as far as the login stage: say why they
+            // ended (scanners never reach here). This is what you need when a
+            // user reports "it doesn't connect".
+            match &r {
+                Err(e) => tracing::info!(%peer, error = %e, "client session ended with error"),
+                Ok(()) => tracing::debug!(%peer, "client session ended"),
+            }
+            r
+        }
         _ => Ok(()), // decode() already rejects other states
     }
 }
@@ -394,6 +408,10 @@ async fn login_flow(
         } else {
             kick::outdated_client()
         };
+        tracing::info!(
+            protocol = handshake.protocol_version,
+            "rejecting client: unsupported protocol version (server speaks 47)"
+        );
         conn.send(&packets::LoginDisconnect { reason }.encode())
             .await?;
         return Ok(());
@@ -412,7 +430,7 @@ async fn login_flow(
             self.0.fetch_sub(1, Ordering::Relaxed);
         }
     }
-    let _pending_guard = PendingGuard(&shared.pending);
+    let pending_guard = PendingGuard(&shared.pending);
 
     // Vanilla online-mode behavior: send the encryption request.
     let mut verify_token = [0u8; 4];
@@ -473,12 +491,23 @@ async fn login_flow(
     };
     conn.send(&brand.encode_cb()).await?;
 
+    // Login is complete: this connection no longer counts as "pending". The
+    // guard used to live for the whole play session, which silently capped
+    // concurrent clients at max_pending (64).
+    drop(pending_guard);
     play_session(conn, shared, login_start.name, secret).await
 }
 
+/// Releases exactly what the session acquired. The old guard decremented
+/// `active_sessions` unconditionally even though only authenticated sessions
+/// incremented it: one wrong token / silent client underflowed the u32 to
+/// 4294967295 and every later client was told "The server is full!".
 struct SessionGuard<'a> {
     shared: &'a Arc<ServerShared>,
+    /// Tunnel address taken from the pool (returned on drop).
     ip: Option<Ipv4Addr>,
+    /// A `max_clients` slot is held (released on drop).
+    counted: bool,
 }
 impl Drop for SessionGuard<'_> {
     fn drop(&mut self) {
@@ -486,7 +515,9 @@ impl Drop for SessionGuard<'_> {
             self.shared.router.unregister(ip);
             self.shared.pool.lock().unwrap().release(ip);
         }
-        self.shared.active_sessions.fetch_sub(1, Ordering::Relaxed);
+        if self.counted {
+            self.shared.active_sessions.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -506,7 +537,11 @@ async fn play_session(
     let keepalive_timeout = keepalive_interval.saturating_mul(3);
     let mut pending_keepalive: Option<(u32, Instant)> = None;
 
-    let mut session = SessionGuard { shared, ip: None };
+    let mut session = SessionGuard {
+        shared,
+        ip: None,
+        counted: false,
+    };
     let mut crypto: Option<TunnelCrypto> = None;
     let mut to_client_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
     let mut auth_deadline =
@@ -617,14 +652,17 @@ async fn play_session(
                                     .await?;
                                 break;
                             }
-                            if shared.active_sessions.load(Ordering::Relaxed)
-                                >= shared.cfg.max_clients
-                            {
+                            // Reserve a slot atomically: check-then-increment let
+                            // concurrent logins overshoot max_clients.
+                            let prev = shared.active_sessions.fetch_add(1, Ordering::AcqRel);
+                            if prev >= shared.cfg.max_clients {
+                                shared.active_sessions.fetch_sub(1, Ordering::AcqRel);
                                 let reason = kick::server_full();
                                 conn.send(&packets::PlayDisconnect { reason }.encode())
                                     .await?;
                                 break;
                             }
+                            session.counted = true;
                             let ip = shared.pool.lock().unwrap().allocate();
                             let Some(ip) = ip else {
                                 let reason = kick::server_full();
@@ -632,6 +670,9 @@ async fn play_session(
                                     .await?;
                                 break;
                             };
+                            // The guard owns the address from here on, so a failed
+                            // send below can no longer leak it from the pool.
+                            session.ip = Some(ip);
                             crypto = Some(TunnelCrypto::derive(&secret, &nonce, Role::Server)?);
                             let (netmask, gateway) = {
                                 let pool = shared.pool.lock().unwrap();
@@ -658,10 +699,13 @@ async fn play_session(
                             let (tx, rx) = mpsc::channel(1024);
                             shared.router.register(ip, tx);
                             to_client_rx = Some(rx);
-                            session.ip = Some(ip);
-                            shared.active_sessions.fetch_add(1, Ordering::Relaxed);
                             auth_deadline = None;
-                            tracing::info!(?username, ip = %ip, "tunnel session established");
+                            tracing::info!(
+                                ?username,
+                                ip = %ip,
+                                peer = ?conn.peer_addr().ok(),
+                                "tunnel session established"
+                            );
                         }
                         tunnel::TunnelMsg::Data(sealed) => {
                             let Some(c) = crypto.as_mut() else { continue };
